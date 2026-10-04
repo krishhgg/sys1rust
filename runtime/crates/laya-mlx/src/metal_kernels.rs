@@ -57,13 +57,19 @@ impl MetalKernel {
     /// `apply` takes them. The body may use `metal::` functions and the vector types; MLX's own
     /// prelude is in scope, no header is added.
     pub fn new(name: &str, inputs: &[&str], outputs: &[&str], source: &str) -> Result<Self, Exception> {
+        Self::with_header(name, inputs, outputs, source, "")
+    }
+
+    /// [`MetalKernel::new`] with `header` placed before the generated kernel: includes and
+    /// helpers the body uses. MLX keeps a copy of the header with the kernel.
+    pub fn with_header(name: &str, inputs: &[&str], outputs: &[&str], source: &str, header: &str) -> Result<Self, Exception> {
         // mlx-rs installs its error handler on its first checked call; before that, mlx-c's
         // default handler exits the process on any error. This checked call makes sure a
         // failure below is reported, not fatal.
         Stream::thread_local_or_default().get_index()?;
         let cname = cstring(name, name)?;
         let csource = cstring(source, name)?;
-        let cheader = cstring("", name)?;
+        let cheader = cstring(header, name)?;
         let ins = StringVec::new(inputs, name)?;
         let outs = StringVec::new(outputs, name)?;
         // SAFETY: every pointer is a live C string or vector for the duration of the call, and

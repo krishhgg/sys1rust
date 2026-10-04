@@ -1,13 +1,15 @@
 //! Equivalence of the work-reduction settings (`dense_upto=1024`, `headprune`, `unpad`, the
 //! three together, and `fuserope` alone and with the three), of boolean masks (`mask=bool`),
-//! and of the round 3 settings (`band`), on the real checkpoints (ignored by default; needs
-//! them in the HF cache, `source bench/env.sh` first).
+//! and of the round 3 settings (`band`, `nax`), on the real checkpoints (ignored by default;
+//! needs them in the HF cache, `source bench/env.sh` first).
 //! Every checkpoint found is run, a missing one is skipped with a note (with
 //! `SYS1_TEST_ALL_CHECKPOINTS=1`, a missing one fails the test). Pass criteria per
 //! question: the same chosen answer (argmax choice, rounded score, noul side) and every
 //! reported probability within 1e-3. The exact settings (`fuserope` against the plain path,
-//! `band` against the plain path and against the round 2 default) must give the same answer
-//! JSON for every state and raw logits and pooled outputs equal bit for bit (`f32::to_bits`).
+//! `band` and `nax` against the plain path and against the round 2 default) must give the
+//! same answer JSON for every state and raw logits and pooled outputs equal bit for bit
+//! (`f32::to_bits`). Every kernel setting must also be listed by `Backend::active_kernels`,
+//! so a load that fell back to the MLX ops fails the test instead of passing as equal.
 //!
 //! The cases are the `bench/workloads/smoke.jsonl` requests plus built edge cases: one question
 //! with 2 options and with 1 option, 20 options, a state past `max_len` (truncated), two states
@@ -269,6 +271,7 @@ fn kernel_settings(spec: &str) -> Vec<&'static str> {
         .filter_map(|s| match s {
             "fuserope" | "fuserope=1" => Some("fuserope"),
             s if s.starts_with("band=") && s != "band=0" => Some("band"),
+            s if s.starts_with("nax=") && s != "nax=0" => Some("nax"),
             _ => None,
         })
         .collect()
@@ -453,6 +456,54 @@ fn band_matches_plain() {
 fn band_with_the_default_matches_the_default() {
     every_checkpoint_on(DEFAULT_ON, "band=1", true);
     every_checkpoint_on(DEFAULT_ON, "band=512", true);
+}
+
+/// `nax=all`: the encoder's 4 linears and the head's 2 residual products on MLX's own NAX gemm
+/// loop with other tiles and launch order, and wo2's split K in one launch. Exact: the same
+/// sums in the same order. On the padded layout (the base settings) and on the packed one (the
+/// round 2 default, `unpad`). On the padded layout the cases reach both sides of the tile
+/// table's 1,024-row limit (two rows padded to 600 make 1,200). Needs a machine where MLX uses NAX (macOS 26.2 or later, GPU
+/// generation 17 or later): elsewhere the load falls back and the kernel check fails the test.
+#[test]
+#[ignore]
+fn nax_matches_plain() {
+    every_checkpoint("nax=all", true);
+    every_checkpoint_on(DEFAULT_ON, "nax=all", true);
+}
+
+/// A kernel setting the load turns off shows in `Backend::active_kernels`, which is how
+/// `compare` refuses a silent fallback: `nax` with weights copied to `[in, out]` (`wcopy=t`)
+/// and `band` with boolean masks fall back at load, the other kernels stay on.
+#[test]
+#[ignore]
+fn fallback_shows_in_active_kernels() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ran = 0;
+    for (name, repo) in CHECKPOINTS {
+        let Some(dir) = checkpoint_dir(name, repo) else {
+            continue;
+        };
+        for (extra, want) in [
+            ("fuserope,band=512,nax=all", &["fuserope", "band", "nax"][..]),
+            ("fuserope,band=512,nax=all,wcopy=t", &["fuserope", "band"][..]),
+            ("fuserope,band=512,nax=all,mask=bool", &["fuserope", "nax"][..]),
+        ] {
+            let agent = load(&dir, &format!("{BASE},{extra}"));
+            assert_eq!(agent.backend().active_kernels(), want, "{name}: {extra}");
+            eprintln!("{name:<16} {extra:<40} active kernels {want:?}");
+        }
+        ran += 1;
+    }
+    assert_ran(ran);
+}
+
+/// The round 3 exact stack, `band=512` and `nax=all`, on the round 2 default, and with the
+/// band from the shortest length up (`band=1`) so every case takes it.
+#[test]
+#[ignore]
+fn stack_matches_plain() {
+    every_checkpoint_on(DEFAULT_ON, "band=512,nax=all", true);
+    every_checkpoint_on(DEFAULT_ON, "band=1,nax=all", true);
 }
 
 /// Boolean masks on every path: `over_max_len` and `heavy_padding` pad past `4 * window`, so

@@ -30,7 +30,9 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 pub mod metal_kernels;
+mod nax_gemm;
 mod split_rope;
+use nax_gemm::NaxGemm;
 use split_rope::SplitRope;
 
 /// Finite "minus infinity" for additive attention masks (safe in f16, no NaN rows).
@@ -122,6 +124,16 @@ struct Knobs {
     /// (checked bit for bit in `tests/settings.rs`). Needs `fuserope` and additive masks;
     /// without them the load prints why and the local layers run as if `band` were 0.
     band: usize,
+    /// The encoder's 4 linears (wqkv, wo, wi, wo2) and the decision head's 2 residual products
+    /// (out_proj, linear2) on MLX's own NAX gemm loop, launched with smaller tiles, row tiles
+    /// first, and wo2's split K in one launch ([`NaxGemm`], `nax=all`; `nax=0`, the default,
+    /// is off). The residual products take the kernel with `addmm` (the default) only. Exact: each output element is the same sum in the same order as MLX's gemm. At
+    /// load the kernels run only where MLX itself uses NAX (macOS 26.2 or later and GPU
+    /// architecture generation 17 or later, which the M5 is), with f16 weights on the GPU as
+    /// transposed views (any `wcopy` but `t`), and only after each one matches MLX's gemm bit
+    /// for bit at every weight shape of the model, a check that runs on every load. Otherwise
+    /// the load prints why and MLX's gemms run. The load prints the check's gemm count and time.
+    nax: bool,
 }
 
 impl Knobs {
@@ -157,6 +169,7 @@ impl Knobs {
             unpad: false,
             fuserope: false,
             band: 0,
+            nax: false,
         };
         for kv in spec.split(',').filter(|s| !s.is_empty()) {
             let (key, val) = match kv.split_once('=') {
@@ -212,6 +225,7 @@ impl Knobs {
                 "unpad" => k.unpad = flag()?,
                 "fuserope" => k.fuserope = flag()?,
                 "band" => k.band = number(value()?)?,
+                "nax" => k.nax = one_of(&["0", "all"])? == "all",
                 _ => return Err(Error::Config(format!("mlx settings: unknown setting `{key}` in `{spec}`"))),
             }
         }
@@ -676,6 +690,8 @@ pub struct MlxBackend {
     /// The padded length from which the local layers take the banded path: `band` when it is
     /// set, masks are additive and `split_rope` passed its banded check at load; else `None`.
     band_from: Option<usize>,
+    /// The `nax` kernels when the setting is on and they passed their load-time check.
+    nax: Option<NaxGemm>,
     knobs: Knobs,
 }
 
@@ -959,6 +975,48 @@ impl MlxBackend {
                     band,
                 )
             });
+            // `nax` is decided at load too. The kernels are checked against MLX's gemm at
+            // every weight shape they may run: the encoder's plain products (wqkv, wi), its
+            // residual products (wo, wo2) and the head's residual products (out_proj, linear2,
+            // whose bias is added after the gemm, with or without the kernel). The head's other
+            // linears add their bias inside MLX's gemm and stay with MLX.
+            let nax = match (knobs.nax, cpu || dtype != Dtype::Float16 || knobs.wcopy == "t") {
+                (false, _) => None,
+                (true, true) => {
+                    eprintln!("laya-mlx: nax needs an f16 model on the GPU with transposed-view weights (not wcopy=t); MLX's gemms run instead");
+                    None
+                }
+                (true, false) => {
+                    let mut mm: Vec<(i32, i32)> = Vec::new();
+                    let mut addmm: Vec<(i32, i32)> = Vec::new();
+                    let add = |list: &mut Vec<(i32, i32)>, l: &Linear| {
+                        let shape = (l.wt.dim(1), l.wt.dim(0));
+                        if !list.contains(&shape) {
+                            list.push(shape);
+                        }
+                    };
+                    for l in &layers {
+                        add(&mut mm, &l.wqkv);
+                        add(&mut mm, &l.wi);
+                        add(&mut addmm, &l.wo);
+                        add(&mut addmm, &l.wo2);
+                    }
+                    for h in &head {
+                        add(&mut addmm, &h.out_proj);
+                        add(&mut addmm, &h.linear2);
+                    }
+                    match NaxGemm::new(&mm, &addmm) {
+                        Ok((k, note)) => {
+                            eprintln!("laya-mlx: {note}");
+                            Some(k)
+                        }
+                        Err(e) => {
+                            eprintln!("laya-mlx: nax is off for this load, MLX's gemms run instead: {e}");
+                            None
+                        }
+                    }
+                }
+            };
             let this = Self {
                 cpu,
                 dtype,
@@ -985,6 +1043,7 @@ impl MlxBackend {
                 geglu: GeGlu::new(&knobs.geglu, knobs.f16gelu),
                 split_rope,
                 band_from,
+                nax,
                 knobs: knobs.clone(),
             };
             // Materialise every weight (and transposed view) once, up front.
@@ -1204,9 +1263,32 @@ impl MlxBackend {
         Ok(Self::window_view(caches.window_bool.as_ref().expect("set above"), len))
     }
 
+    /// `x @ W^T` for a linear without bias: the `nax` kernel where it has a configuration for
+    /// the shape, MLX's gemm otherwise.
+    fn mm(&self, l: &Linear, x: &Array) -> Result<Array> {
+        if let (Some(kernel), None) = (&self.nax, &l.b) {
+            // The kernel takes the weight as stored, `[out, in]`: `wt` is a transposed view of
+            // it, so this transpose is a view too.
+            if let Some(y) = kernel.matmul(x, &ops::transpose(&l.wt).lx()?)? {
+                return Ok(y);
+            }
+        }
+        l.apply(x)
+    }
+
     /// `residual + x @ W^T (+ b)`, fused into the gemm unless `addmm=0`.
     fn lin_add(&self, l: &Linear, x: &Array, residual: &Array) -> Result<Array> {
         if self.knobs.addmm {
+            if let Some(kernel) = &self.nax {
+                // As in `mm`, a view of the weight as stored. The bias goes on after the gemm,
+                // as in `Linear::apply_add`.
+                if let Some(y) = kernel.addmm(x, &ops::transpose(&l.wt).lx()?, residual)? {
+                    return match &l.b {
+                        Some(b) => ops::add(&y, b).lx(),
+                        None => Ok(y),
+                    };
+                }
+            }
             return l.apply_add(x, residual);
         }
         ops::add(&l.apply(x)?, residual).lx()
@@ -1417,7 +1499,7 @@ impl MlxBackend {
                 None => h.clone(),
             };
             mark("attn_norm", &[&a])?;
-            let qkv = layer.wqkv.apply(&a)?;
+            let qkv = self.mm(&layer.wqkv, &a)?;
             // Attention output as `[n, len, d]`, or `[T, d]` when packed.
             let att = match (&ctx.local, layer.local, &fused) {
                 (LocalAttn::Banded(bd), true, Some((kernel, dims))) => {
@@ -1491,7 +1573,7 @@ impl MlxBackend {
 
             let m = layer.mlp_norm.apply(&h)?;
             mark("mlp_norm", &[&m])?;
-            let wi = layer.wi.apply(&m)?;
+            let wi = self.mm(&layer.wi, &m)?;
             mark("wi", &[&wi])?;
             let act = self.geglu.apply(&wi)?;
             mark("geglu", &[&act])?;
@@ -1635,10 +1717,14 @@ impl Backend for MlxBackend {
     }
 
     fn active_kernels(&self) -> &'static [&'static str] {
-        match (&self.split_rope, self.band_from) {
-            (Some(_), Some(_)) => &["fuserope", "band"],
-            (Some(_), None) => &["fuserope"],
-            (None, _) => &[],
+        // One static list per combination: nothing is allocated per load.
+        match (&self.split_rope, self.band_from, &self.nax) {
+            (Some(_), Some(_), Some(_)) => &["fuserope", "band", "nax"],
+            (Some(_), Some(_), None) => &["fuserope", "band"],
+            (Some(_), None, Some(_)) => &["fuserope", "nax"],
+            (Some(_), None, None) => &["fuserope"],
+            (None, _, Some(_)) => &["nax"],
+            (None, _, None) => &[],
         }
     }
 
@@ -1759,6 +1845,11 @@ mod tests {
         assert_eq!(Knobs::from_spec(Some("band=512,band=0")).unwrap().band, 0);
         assert!(Knobs::from_spec(Some("band")).is_err());
         assert!(Knobs::from_spec(Some("band=-1")).is_err());
+        assert!(!k.nax);
+        assert!(Knobs::from_spec(Some("nax=all")).unwrap().nax);
+        assert!(!Knobs::from_spec(Some("nax=all,nax=0")).unwrap().nax);
+        assert!(Knobs::from_spec(Some("nax")).is_err());
+        assert!(Knobs::from_spec(Some("nax=split")).is_err());
     }
 
     /// The padding rows of a batch go through the packing as their row's token 0, and every
