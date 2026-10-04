@@ -16,6 +16,7 @@
 //! (round 3) runs the local layers' attention by chunks in a layout that kernel writes.
 //! Loading settings (round 3): `directload` (f16 tensors copied into MLX from the checkpoint
 //! as they are) and `sharehead` (the pruned head layer's projections as views of the full one).
+//! [`MLX_ENV_DEFAULTS`] lists the MLX environment variables sys1d sets for itself.
 //! Experiments that gained nothing (`split`, `rope1`, `splitk`) were removed after commit
 //! 0495800; that commit has their code.
 
@@ -262,6 +263,37 @@ impl Knobs {
 /// a run with its settings (sys1-bench, sys1-probe) call this at startup.
 pub fn check_settings(spec: &str) -> Result<()> {
     Knobs::parse(spec).map(|_| ())
+}
+
+/// MLX environment variables that sys1d (and sys1-bench's `mlx-fp16-lean` variant) set for
+/// themselves when the user has not set them. These are process-wide MLX limits, not backend
+/// settings, so they live outside `Knobs`.
+///
+/// `MLX_MAX_MB_PER_BUFFER`: MLX commits a Metal command buffer once the inputs of the ops in it
+/// pass this many Mi elements. The name says MB, but MLX 0.32.2 adds `array::data_size()`, an
+/// element count, once per input buffer. MLX's default is 40 on this M5 (50 on Max and Ultra
+/// GPUs). With 10 on top of `band=512,nax=all`, s512_q1 took 0.931 of the time and s512_q10
+/// 0.981, with the same answers (`results/SPEED.md`, round 3). MLX reads the variable once,
+/// when it creates the Metal device at the first GPU operation, so it must be set before that.
+pub const MLX_ENV_DEFAULTS: [(&str, &str); 1] = [("MLX_MAX_MB_PER_BUFFER", "10")];
+
+/// The entries of [`MLX_ENV_DEFAULTS`] whose variable `get` reports as unset. A value the user
+/// set, even an empty one, is kept.
+pub fn mlx_env_unset(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<(&'static str, &'static str)> {
+    MLX_ENV_DEFAULTS.into_iter().filter(|(key, _)| get(key).is_none()).collect()
+}
+
+/// Set the [`MLX_ENV_DEFAULTS`] the environment does not have yet and return them.
+///
+/// Call it first thing in `main`, before any MLX call (MLX reads the variables once) and before
+/// the process starts a thread: setting a variable while another thread reads the environment
+/// is a data race on macOS.
+pub fn set_mlx_env_defaults() -> Vec<(&'static str, &'static str)> {
+    let unset = mlx_env_unset(|key| std::env::var_os(key));
+    for (key, value) in &unset {
+        std::env::set_var(key, value);
+    }
+    unset
 }
 
 /// Convert an MLX exception into a `laya_core::Error::Backend`.
@@ -2037,6 +2069,25 @@ mod tests {
         assert!(err("wired=2048,f16gelu,cache=512 ").contains("`cache=512 `"));
         assert_eq!(check_settings("f16gelu,cache=512,wired=2048").ok(), Some(()));
         assert!(check_settings("f16gelu,cache=512x").is_err());
+    }
+
+    /// Only the MLX variables the environment lacks are set; any user value is kept.
+    #[test]
+    fn mlx_env_defaults_keep_the_users_values() {
+        use std::ffi::OsString;
+        assert_eq!(mlx_env_unset(|_| None), vec![("MLX_MAX_MB_PER_BUFFER", "10")]);
+        assert_eq!(mlx_env_unset(|_| Some(OsString::from("40"))), vec![]);
+        assert_eq!(mlx_env_unset(|_| Some(OsString::new())), vec![]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        mlx_env_unset(|key| {
+            asked.borrow_mut().push(key.to_string());
+            None
+        });
+        assert_eq!(asked.into_inner(), vec!["MLX_MAX_MB_PER_BUFFER"]);
+        // MLX parses the value with atoi, so it must be a plain integer.
+        for (_, value) in MLX_ENV_DEFAULTS {
+            assert!(value.parse::<i32>().is_ok_and(|v| v > 0), "{value}");
+        }
     }
 
     /// The per-shape cache admits `cap` distinct shapes, then only the shapes it already holds.
