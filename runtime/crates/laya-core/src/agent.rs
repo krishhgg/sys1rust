@@ -1,7 +1,8 @@
 //! The high-level runtime: `Agent.predict` / `Agent.predict_batch` over any [`Backend`].
 //!
 //! Changed in sys1rust from laya-r-mlx 914c9a7: `Timing` records the batch shape; `collate`
-//! pads to the backend's `padded_len`.
+//! pads to the backend's `padded_len`; `load` can load the tokenizer on a second thread
+//! (`parallel_load`).
 
 use crate::backend::{Backend, BackendOptions, Batch};
 use crate::config::ModelConfig;
@@ -10,7 +11,7 @@ use crate::question::{parse_questions, Question};
 use crate::sequence::{collate_to, encode_state, EncodedItem};
 use crate::tokenizer::LayaTokenizer;
 use crate::weights::Weights;
-use crate::{Result, MODEL_NAME};
+use crate::{Error, Result, MODEL_NAME};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -59,17 +60,75 @@ pub struct Timing {
 
 impl Agent {
     /// Load a checkpoint directory (see [`crate::resolve::resolve_model_dir`]) with a backend.
+    ///
+    /// With the `parallel_load` setting ([`BackendOptions::parallel_load`]) the tokenizer
+    /// loads on a second thread while this one opens the weights and builds the backend. The
+    /// agent is the same, and so is the error when loading fails: the tokenizer's first, as
+    /// when the parts load one after the other. A tokenizer file that is not there, or a
+    /// tokenizer that has failed by the time the weights are open, stops the load before the
+    /// backend is built, also as in order.
     pub fn load(
         model_dir: &Path,
         opts: &BackendOptions,
         make_backend: Box<BackendFactory<'_>>,
     ) -> Result<Self> {
         let cfg = ModelConfig::load(model_dir)?;
-        let tokenizer = LayaTokenizer::load(model_dir)?;
-        let weights = Weights::open(model_dir)?;
-        weights.verify()?;
-        let act_head = ActHead::load(&weights)?;
-        let backend = make_backend(&weights, &cfg, opts)?;
+        // Without the tokenizer file the load runs in order, so the tokenizer's error comes
+        // before any backend work.
+        let parallel = opts.parallel_load()? && LayaTokenizer::file(model_dir).is_file();
+        // The weights and the backend load on the calling thread: MLX keeps its default device
+        // and stream per thread, so the backend is built where it was before.
+        let open = || -> Result<(Weights, ActHead)> {
+            let weights = Weights::open(model_dir)?;
+            weights.verify()?;
+            let act_head = ActHead::load(&weights)?;
+            Ok((weights, act_head))
+        };
+        let (tokenizer, act_head, backend) = if parallel {
+            std::thread::scope(|s| -> Result<_> {
+                let worker = std::thread::Builder::new()
+                    .name("laya-tokenizer".into())
+                    .spawn_scoped(s, || LayaTokenizer::load(model_dir));
+                let Ok(worker) = worker else {
+                    // No second thread: load in order on this one.
+                    let tokenizer = LayaTokenizer::load(model_dir)?;
+                    let (weights, act_head) = open()?;
+                    return Ok((tokenizer, act_head, make_backend(&weights, &cfg, opts)?));
+                };
+                // Every path joins the worker before it returns, so the scope never re-raises
+                // the worker's panic.
+                let join = |worker: std::thread::ScopedJoinHandle<'_, Result<LayaTokenizer>>| {
+                    worker.join().unwrap_or_else(|_| {
+                        Err(Error::Tokenizer(
+                            "the tokenizer loading thread panicked".into(),
+                        ))
+                    })
+                };
+                let opened = open();
+                // A tokenizer that has already failed stops the load here, before the backend
+                // build (MLX's start and the weight upload). This looks once and never waits:
+                // a tokenizer that fails later, while the backend builds, is reported after it.
+                let done = if worker.is_finished() {
+                    Ok(join(worker)?)
+                } else {
+                    Err(worker)
+                };
+                let built = opened.and_then(|(weights, act_head)| {
+                    Ok((act_head, make_backend(&weights, &cfg, opts)?))
+                });
+                let tokenizer = match done {
+                    Ok(tokenizer) => tokenizer,
+                    Err(worker) => join(worker)?,
+                };
+                let (act_head, backend) = built?;
+                Ok((tokenizer, act_head, backend))
+            })?
+        } else {
+            let tokenizer = LayaTokenizer::load(model_dir)?;
+            let (weights, act_head) = open()?;
+            let backend = make_backend(&weights, &cfg, opts)?;
+            (tokenizer, act_head, backend)
+        };
         let mut agent = Self::from_parts(cfg, tokenizer, act_head, backend)?;
         agent.model_dir = model_dir.to_path_buf();
         Ok(agent)
@@ -219,8 +278,8 @@ mod tests {
 
     const HIDDEN: usize = 8;
 
-    /// A whitespace word-level tokenizer over a few words; anything else is `[UNK]`.
-    fn test_tokenizer() -> LayaTokenizer {
+    /// The `tokenizer.json` of [`test_tokenizer`].
+    fn tokenizer_spec() -> Value {
         let words = [
             "[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "question", ":", "choice", "score",
             "noul", "yes", "no", "level", "0", "1", "2", "3", "refund", "billing", "the", "a",
@@ -231,12 +290,17 @@ mod tests {
             .enumerate()
             .map(|(i, w)| (w.to_string(), Value::from(i as u32)))
             .collect();
-        let spec = json!({
+        json!({
             "version": "1.0",
             "model": {"type": "WordLevel", "vocab": vocab, "unk_token": "[UNK]"},
             "pre_tokenizer": {"type": "Whitespace"},
-        });
-        let tok = tokenizers::Tokenizer::from_bytes(serde_json::to_vec(&spec).unwrap()).unwrap();
+        })
+    }
+
+    /// A whitespace word-level tokenizer over a few words; anything else is `[UNK]`.
+    fn test_tokenizer() -> LayaTokenizer {
+        let spec = serde_json::to_vec(&tokenizer_spec()).unwrap();
+        let tok = tokenizers::Tokenizer::from_bytes(spec).unwrap();
         LayaTokenizer::from_tokenizer(tok, &Value::Null).unwrap()
     }
 
@@ -246,6 +310,12 @@ mod tests {
     }
 
     fn test_act_head_with_classes(d_in: usize, n_act: usize) -> ActHead {
+        let [(_, s0, w0), (_, _, b0), (_, s2, w2), (_, _, b2)] = act_head_tensors(d_in, n_act);
+        ActHead::from_tensors(s0, w0, b0, s2, w2, b2).unwrap()
+    }
+
+    /// The `act_head.*` tensors of [`test_act_head_with_classes`]: name, shape, values.
+    fn act_head_tensors(d_in: usize, n_act: usize) -> [(&'static str, Vec<usize>, Vec<f32>); 4] {
         let h = 6;
         let w0 = (0..h * d_in)
             .map(|i| ((i * 7 % 11) as f32 - 5.0) / 10.0)
@@ -255,20 +325,31 @@ mod tests {
             .map(|i| ((i * 5 % 7) as f32 - 3.0) / 10.0)
             .collect();
         let b2 = (0..n_act).map(|i| 0.1 - 0.2 * i as f32).collect();
-        ActHead::from_tensors(vec![h, d_in], w0, b0, vec![n_act, h], w2, b2).unwrap()
+        [
+            ("act_head.0.weight", vec![h, d_in], w0),
+            ("act_head.0.bias", vec![h], b0),
+            ("act_head.2.weight", vec![n_act, h], w2),
+            ("act_head.2.bias", vec![n_act], b2),
+        ]
+    }
+
+    /// `encoder/config.json` and `rl_agent_config.json` of [`test_config`].
+    fn config_files() -> (Value, Value) {
+        let encoder = json!({
+            "model_type": "modernbert", "vocab_size": 32, "hidden_size": HIDDEN,
+            "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 16,
+        });
+        let agent = json!({
+            "encoder": "test", "max_len": 64, "head_max_len": 32,
+            "act_costs": {"escalate": 1.0}, "temperature": [1.2, 0.8, 1.0],
+        });
+        (encoder, agent)
     }
 
     fn test_config() -> ModelConfig {
-        let encoder = EncoderConfig::from_value(&json!({
-            "model_type": "modernbert", "vocab_size": 32, "hidden_size": HIDDEN,
-            "num_hidden_layers": 2, "num_attention_heads": 2, "intermediate_size": 16,
-        }))
-        .unwrap();
-        let agent: AgentConfig = serde_json::from_value(json!({
-            "encoder": "test", "max_len": 64, "head_max_len": 32,
-            "act_costs": {"escalate": 1.0}, "temperature": [1.2, 0.8, 1.0],
-        }))
-        .unwrap();
+        let (encoder, agent) = config_files();
+        let encoder = EncoderConfig::from_value(&encoder).unwrap();
+        let agent: AgentConfig = serde_json::from_value(agent).unwrap();
         ModelConfig { agent, encoder }
     }
 
@@ -401,6 +482,204 @@ mod tests {
             "{e}"
         );
         assert_eq!(test_config().n_act(), 2);
+    }
+
+    /// A checkpoint directory of the test model under the system temp dir, removed on drop:
+    /// the [`config_files`], the [`tokenizer_spec`], and a `model.safetensors` with the
+    /// [`act_head_tensors`] and one tensor of each family [`Weights::verify`] asks for.
+    struct ModelDir(PathBuf);
+
+    impl ModelDir {
+        fn new() -> Self {
+            use safetensors::tensor::TensorView;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "laya-core-agent-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let (encoder, agent) = config_files();
+            for (path, value) in [
+                ("encoder/config.json", encoder),
+                ("rl_agent_config.json", agent),
+                ("tokenizer/tokenizer.json", tokenizer_spec()),
+            ] {
+                let path = dir.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            let mut tensors: Vec<(&str, Vec<usize>, Vec<u8>)> = act_head_tensors(HIDDEN + 4, 2)
+                .into_iter()
+                .map(|(name, shape, v)| {
+                    (
+                        name,
+                        shape,
+                        v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+                    )
+                })
+                .collect();
+            for name in ["encoder.w", "type_emb.weight", "scorer.w"] {
+                tensors.push((name, vec![2], vec![0; 8]));
+            }
+            let views = tensors.iter().map(|(name, shape, bytes)| {
+                let view = TensorView::new(safetensors::Dtype::F32, shape.clone(), bytes);
+                (*name, view.unwrap())
+            });
+            let bytes = safetensors::serialize(views, None).unwrap();
+            std::fs::write(dir.join("model.safetensors"), bytes).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for ModelDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// [`Agent::load`] with `tuning` and a factory that builds a [`SyntheticBackend`] padding
+    /// to 16, or fails with `backend_error`. The factory checks it runs on the calling thread.
+    fn load_with(dir: &Path, tuning: &str, backend_error: Option<&str>) -> Result<Agent> {
+        load_seen(dir, tuning, backend_error).0
+    }
+
+    /// [`load_with`], and whether the load called the factory.
+    fn load_seen(dir: &Path, tuning: &str, backend_error: Option<&str>) -> (Result<Agent>, bool) {
+        let caller = std::thread::current().id();
+        let opts = BackendOptions {
+            tuning: Some(tuning.into()),
+            ..Default::default()
+        };
+        let backend_error = backend_error.map(str::to_string);
+        let called = std::cell::Cell::new(false);
+        let agent = Agent::load(
+            dir,
+            &opts,
+            Box::new(|_: &Weights, cfg: &ModelConfig, _: &BackendOptions| {
+                assert_eq!(
+                    std::thread::current().id(),
+                    caller,
+                    "backend built off the calling thread"
+                );
+                called.set(true);
+                match backend_error {
+                    Some(e) => Err(Error::Backend(e)),
+                    None => Ok(Box::new(SyntheticBackend {
+                        hidden: cfg.hidden_size(),
+                        pad_to: 16,
+                    }) as Box<dyn Backend>),
+                }
+            }),
+        );
+        (agent, called.get())
+    }
+
+    /// `parallel_load` loads the same agent as loading in order, and the same as the one
+    /// assembled from the same parts in memory.
+    #[test]
+    fn parallel_load_loads_the_same_agent() {
+        let dir = ModelDir::new();
+        let in_order = load_with(&dir.0, "", None).unwrap();
+        let parallel = load_with(&dir.0, "f16gelu,parallel_load", None).unwrap();
+        let parts = test_agent(16);
+        assert_eq!(parallel.model_dir, dir.0);
+        let questions = questions();
+        for state in states() {
+            let want = parts.predict(&state, &questions).unwrap();
+            assert_eq!(in_order.predict(&state, &questions).unwrap(), want);
+            assert_eq!(parallel.predict(&state, &questions).unwrap(), want);
+        }
+    }
+
+    /// With `parallel_load` every failed load is the same error as loading in order, never a
+    /// panic: a missing or broken tokenizer, missing or cut weights, a backend that fails, and
+    /// both the tokenizer and the weights missing (the tokenizer's error comes first). A bad
+    /// value of the setting fails before anything loads.
+    #[test]
+    fn parallel_load_fails_like_loading_in_order() {
+        fn remove(dir: &Path, file: &str) {
+            std::fs::remove_file(dir.join(file)).unwrap();
+        }
+        fn cut(dir: &Path) {
+            let path = dir.join("model.safetensors");
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        }
+        type Break = fn(&Path);
+        let cases: [(&str, Break, Option<&str>, &str); 6] = [
+            (
+                "no tokenizer",
+                |d| remove(d, "tokenizer/tokenizer.json"),
+                None,
+                "tokenizer: ",
+            ),
+            (
+                "broken tokenizer",
+                |d| std::fs::write(d.join("tokenizer/tokenizer.json"), b"{").unwrap(),
+                None,
+                "tokenizer: ",
+            ),
+            (
+                "no weights",
+                |d| remove(d, "model.safetensors"),
+                None,
+                "weights: 'model.safetensors' not found",
+            ),
+            (
+                "cut weights",
+                cut,
+                None,
+                "is truncated or not a safetensors file",
+            ),
+            (
+                "backend fails",
+                |_| {},
+                Some("no device"),
+                "backend: no device",
+            ),
+            (
+                "no tokenizer, no weights",
+                |d| {
+                    remove(d, "tokenizer/tokenizer.json");
+                    remove(d, "model.safetensors");
+                },
+                None,
+                "tokenizer: ",
+            ),
+        ];
+        for (name, break_it, backend_error, want) in cases {
+            let dir = ModelDir::new();
+            break_it(&dir.0);
+            let in_order = load_with(&dir.0, "", backend_error)
+                .unwrap_err()
+                .to_string();
+            let parallel = load_with(&dir.0, "parallel_load", backend_error)
+                .unwrap_err()
+                .to_string();
+            assert!(in_order.contains(want), "{name}: {in_order}");
+            assert_eq!(parallel, in_order, "{name}");
+        }
+        let dir = ModelDir::new();
+        let e = load_with(&dir.0, "parallel_load=2", Some("built anyway"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("`parallel_load=2`"), "{e}");
+    }
+
+    /// A missing tokenizer file fails the load before the backend is built, with
+    /// `parallel_load` as in order: the backend build is where MLX starts and uploads the
+    /// weights.
+    #[test]
+    fn a_missing_tokenizer_fails_before_the_backend() {
+        let dir = ModelDir::new();
+        std::fs::remove_file(dir.0.join("tokenizer/tokenizer.json")).unwrap();
+        for tuning in ["", "parallel_load"] {
+            let (agent, built) = load_seen(&dir.0, tuning, None);
+            let e = agent.unwrap_err().to_string();
+            assert!(e.starts_with("tokenizer: "), "{tuning:?}: {e}");
+            assert!(!built, "{tuning:?}: the backend was built");
+        }
     }
 
     #[test]

@@ -14,6 +14,8 @@
 //! the real tokens outside attention). `fuserope` (round 2) runs the encoder's qkv split,
 //! head reshape, RoPE and unpad expand as one custom Metal kernel (`split_rope.rs`). `band`
 //! (round 3) runs the local layers' attention by chunks in a layout that kernel writes.
+//! Loading settings (round 3): `directload` (f16 tensors copied into MLX from the checkpoint
+//! as they are) and `sharehead` (the pruned head layer's projections as views of the full one).
 //! Experiments that gained nothing (`split`, `rope1`, `splitk`) were removed after commit
 //! 0495800; that commit has their code.
 
@@ -25,6 +27,7 @@ use mlx_rs::error::Exception;
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::transforms::compile::compile;
 use mlx_rs::{fast, nn, ops, transforms, Array, Dtype, Stream};
+use safetensors::tensor::TensorView;
 use safetensors::SafeTensors;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -134,6 +137,18 @@ struct Knobs {
     /// for bit at every weight shape of the model, a check that runs on every load. Otherwise
     /// the load prints why and MLX's gemms run. The load prints the check's gemm count and time.
     nax: bool,
+    /// Copy each F16 tensor of the checkpoint into MLX as it is, instead of through a converted
+    /// `Vec` first (see [`Loader::direct`]). Exact: the same bits; a tensor of another dtype,
+    /// or an f32 model, takes the conversion path.
+    directload: bool,
+    /// With `headprune`, take the pruned last head layer's q and k|v projections as views of
+    /// its full projection instead of loading them again. With the default `wcopy=view` each
+    /// copy keeps a whole checkpoint tensor alive, so this frees 2 copies of that weight and
+    /// bias: 12.0 MiB of MLX memory on the 1,024-wide checkpoints and 6.8 MiB on multilingual
+    /// (research round 2). Exact: the same values. With `wcopy=view` or `gpu` the views have
+    /// the copies' strides; with `wcopy=t` they keep the full projection's row stride, 3 times
+    /// a copy's. All three are checked bit for bit in `tests/settings.rs`.
+    sharehead: bool,
 }
 
 impl Knobs {
@@ -170,6 +185,8 @@ impl Knobs {
             fuserope: false,
             band: 0,
             nax: false,
+            directload: false,
+            sharehead: false,
         };
         for kv in spec.split(',').filter(|s| !s.is_empty()) {
             let (key, val) = match kv.split_once('=') {
@@ -226,6 +243,13 @@ impl Knobs {
                 "fuserope" => k.fuserope = flag()?,
                 "band" => k.band = number(value()?)?,
                 "nax" => k.nax = one_of(&["0", "all"])? == "all",
+                "directload" => k.directload = flag()?,
+                "sharehead" => k.sharehead = flag()?,
+                // Read by `laya_core::Agent::load` ([`BackendOptions::parallel_load`]), which loads
+                // the tokenizer on a second thread; checked here so a bad value fails here too.
+                "parallel_load" => {
+                    flag()?;
+                }
                 _ => return Err(Error::Config(format!("mlx settings: unknown setting `{key}` in `{spec}`"))),
             }
         }
@@ -612,15 +636,44 @@ struct Loader<'a> {
     st: SafeTensors<'a>,
     dtype: Dtype,
     wcopy: String,
+    /// The `directload` setting.
+    directload: bool,
 }
 
 impl Loader<'_> {
+    /// Whether [`Self::get`] copies `t`'s bytes into MLX as they are (`directload`): an F16
+    /// tensor into an f16 model, on a little-endian machine (safetensors stores little-endian),
+    /// whose data starts at an even address (MLX reads it through an f16 pointer) and holds
+    /// exactly its shape's elements. Every other tensor goes through a converted `Vec` first,
+    /// which for an F16 tensor gives the same bits with one more copy.
+    fn direct(&self, t: &TensorView<'_>) -> bool {
+        let data = t.data();
+        self.directload
+            && cfg!(target_endian = "little")
+            && self.dtype == Dtype::Float16
+            && t.dtype() == safetensors::Dtype::F16
+            && data.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0
+            && data.len() == 2 * t.shape().iter().product::<usize>()
+    }
+
     fn get(&self, name: &str) -> Result<Array> {
         let t = self
             .st
             .tensor(name)
             .map_err(|e| Error::Weights(format!("{name}: {e}")))?;
         let shape: Vec<i32> = t.shape().iter().map(|&d| d as i32).collect();
+        if self.direct(&t) {
+            // SAFETY: `direct` checked that the data is 2-byte aligned and holds exactly the
+            // shape's f16 elements. `mlx_array_new_data` copies them into a new MLX buffer
+            // before it returns, as for `Array::from_slice`, so the array never points into
+            // the checkpoint's mapping.
+            let a = unsafe { Array::from_raw_data(t.data().as_ptr().cast(), &shape, Dtype::Float16) };
+            // A failed `mlx_array_new_data` returns an empty handle; dropping it frees nothing.
+            if a.as_ptr().ctx.is_null() {
+                return Err(Error::Weights(format!("{name}: MLX could not create the array")));
+            }
+            return Ok(a);
+        }
         let arr = match self.dtype {
             Dtype::Float32 => Array::from_slice(&to_f32(&t)?, &shape),
             _ => Array::from_slice(&to_f16(&t)?, &shape),
@@ -886,6 +939,7 @@ impl MlxBackend {
             st: w.view()?,
             dtype,
             wcopy: knobs.wcopy.clone(),
+            directload: knobs.directload,
         };
 
         if std::env::var_os("SYS1_MLX").is_some() {
@@ -930,21 +984,30 @@ impl MlxBackend {
                     format!("{p}.self_attn.in_proj_weight"),
                     format!("{p}.self_attn.in_proj_bias"),
                 );
+                let in_proj = loader.linear(&in_w, Some(&in_b))?;
+                let split_proj = match (knobs.headprune && j + 1 == cfg.agent.head_layers, knobs.sharehead) {
+                    (false, _) => None,
+                    // Columns of `in_proj`'s `[in, 3d]` weight and its bias: views, no copy.
+                    (true, true) => {
+                        let cols = |c: std::ops::Range<i32>| Linear {
+                            wt: in_proj.wt.index((.., c.clone())),
+                            b: in_proj.b.as_ref().map(|b| b.index(c)),
+                        };
+                        Some((cols(0..d), cols(d..3 * d)))
+                    }
+                    (true, false) => Some((
+                        loader.linear_rows(&in_w, Some(&in_b), 0..d)?,
+                        loader.linear_rows(&in_w, Some(&in_b), d..3 * d)?,
+                    )),
+                };
                 head.push(HeadLayer {
                     norm1: loader.norm(
                         &format!("{p}.norm1.weight"),
                         Some(&format!("{p}.norm1.bias")),
                         1e-5,
                     )?,
-                    in_proj: loader.linear(&in_w, Some(&in_b))?,
-                    split_proj: if knobs.headprune && j + 1 == cfg.agent.head_layers {
-                        Some((
-                            loader.linear_rows(&in_w, Some(&in_b), 0..d)?,
-                            loader.linear_rows(&in_w, Some(&in_b), d..3 * d)?,
-                        ))
-                    } else {
-                        None
-                    },
+                    in_proj,
+                    split_proj,
                     out_proj: loader.linear(
                         &format!("{p}.self_attn.out_proj.weight"),
                         Some(&format!("{p}.self_attn.out_proj.bias")),
@@ -1850,6 +1913,62 @@ mod tests {
         assert!(!Knobs::from_spec(Some("nax=all,nax=0")).unwrap().nax);
         assert!(Knobs::from_spec(Some("nax")).is_err());
         assert!(Knobs::from_spec(Some("nax=split")).is_err());
+        assert!(!k.directload && !k.sharehead);
+        let k = Knobs::from_spec(Some("directload,sharehead,parallel_load")).unwrap();
+        assert!(k.directload && k.sharehead);
+        let k = Knobs::from_spec(Some("directload=1,sharehead=1,directload=0,sharehead=0,parallel_load=0")).unwrap();
+        assert!(!k.directload && !k.sharehead);
+        for bad in ["directload=2", "sharehead=yes", "parallel_load=2"] {
+            assert!(Knobs::from_spec(Some(bad)).is_err(), "{bad}");
+        }
+    }
+
+    /// `directload` gives the same arrays as the conversion path, bit for bit: an F16 tensor
+    /// with zeros of both signs, a subnormal, the largest finite f16, an infinity and a NaN,
+    /// and the BF16 and F32 tensors that take the conversion path anyway. Only the F16 tensor
+    /// into an f16 model, at an even address, is copied directly; the same file placed at an
+    /// odd address puts every tensor there and takes the conversion path.
+    #[test]
+    fn directload_gives_the_same_bits() {
+        let le16 = |v: &[u16]| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let f16 = le16(&[0x0000, 0x8000, 0x0001, 0x3c00, 0xbc00, 0x7bff, 0x7c00, 0x7e01]);
+        let bf16 = le16(&[0x3f80, 0xc000, 0x0000, 0x4049]);
+        let f32: Vec<u8> = [1.5f32, -0.0, 3.25e-5, 65504.0].iter().flat_map(|x| x.to_le_bytes()).collect();
+        use safetensors::Dtype as St;
+        let views = [
+            ("h", TensorView::new(St::F16, vec![2, 4], &f16).unwrap()),
+            ("b", TensorView::new(St::BF16, vec![4], &bf16).unwrap()),
+            ("f", TensorView::new(St::F32, vec![2, 2], &f32).unwrap()),
+        ];
+        let file = safetensors::serialize(views, None).unwrap();
+        // Every tensor's data starts at `8 + header + offset`, and every offset is even.
+        let data_start = 8 + u64::from_le_bytes(file[..8].try_into().unwrap()) as usize;
+        for odd in [false, true] {
+            let mut storage = vec![0u8; file.len() + 1];
+            let base_odd = (storage.as_ptr() as usize + data_start) % 2 == 1;
+            let at = usize::from(base_odd != odd);
+            storage[at..at + file.len()].copy_from_slice(&file);
+            let bytes = &storage[at..at + file.len()];
+            for dtype in [Dtype::Float16, Dtype::Float32] {
+                let loader = |directload| Loader {
+                    st: SafeTensors::deserialize(bytes).unwrap(),
+                    dtype,
+                    wcopy: "view".into(),
+                    directload,
+                };
+                let (plain, direct) = (loader(false), loader(true));
+                for name in ["h", "b", "f"] {
+                    let t = direct.st.tensor(name).unwrap();
+                    let want = !odd && dtype == Dtype::Float16 && name == "h";
+                    assert_eq!(direct.direct(&t), want, "{name}, {dtype:?}, odd address {odd}");
+                    assert!(!plain.direct(&t));
+                    let (x, y) = (plain.get(name).unwrap(), direct.get(name).unwrap());
+                    assert_eq!((x.shape(), x.dtype()), (y.shape(), dtype));
+                    assert_eq!(y.dtype(), dtype);
+                    assert!(same_bits(&x, &y).unwrap(), "{name}, {dtype:?}, odd address {odd}");
+                }
+            }
+        }
     }
 
     /// The padding rows of a batch go through the packing as their row's token 0, and every

@@ -2,7 +2,7 @@
 
 use crate::{Error, Result};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
 pub struct LayaTokenizer {
@@ -35,12 +35,17 @@ fn special_str(cfg: &Value, key: &str) -> Option<String> {
 }
 
 impl LayaTokenizer {
+    /// The tokenizer file [`Self::load`] reads, `<dir>/tokenizer/tokenizer.json`.
+    pub fn file(model_dir: &Path) -> PathBuf {
+        model_dir.join("tokenizer").join("tokenizer.json")
+    }
+
     /// Load `<dir>/tokenizer/tokenizer.json` (+ `tokenizer_config.json` for the special tokens).
     pub fn load(model_dir: &Path) -> Result<Self> {
         let tdir = model_dir.join("tokenizer");
-        let tok = Tokenizer::from_file(tdir.join("tokenizer.json")).map_err(|e| {
-            Error::Tokenizer(format!("{}: {e}", tdir.join("tokenizer.json").display()))
-        })?;
+        let file = Self::file(model_dir);
+        let tok = Tokenizer::from_file(&file)
+            .map_err(|e| Error::Tokenizer(format!("{}: {e}", file.display())))?;
         let cfg: Value = match std::fs::read(tdir.join("tokenizer_config.json")) {
             Ok(b) => serde_json::from_slice(&b)?,
             Err(_) => Value::Null,

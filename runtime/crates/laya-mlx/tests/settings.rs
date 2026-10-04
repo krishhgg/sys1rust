@@ -1,7 +1,8 @@
 //! Equivalence of the work-reduction settings (`dense_upto=1024`, `headprune`, `unpad`, the
 //! three together, and `fuserope` alone and with the three), of boolean masks (`mask=bool`),
-//! and of the round 3 settings (`band`, `nax`), on the real checkpoints (ignored by default;
-//! needs them in the HF cache, `source bench/env.sh` first).
+//! and of the round 3 settings (`band`, `nax`, and the loading settings `directload`,
+//! `sharehead` and `parallel_load`), on the real checkpoints (ignored by default; needs them
+//! in the HF cache, `source bench/env.sh` first).
 //! Every checkpoint found is run, a missing one is skipped with a note (with
 //! `SYS1_TEST_ALL_CHECKPOINTS=1`, a missing one fails the test). Pass criteria per
 //! question: the same chosen answer (argmax choice, rounded score, noul side) and every
@@ -498,12 +499,45 @@ fn fallback_shows_in_active_kernels() {
 }
 
 /// The round 3 exact stack, `band=512` and `nax=all`, on the round 2 default, and with the
-/// band from the shortest length up (`band=1`) so every case takes it.
+/// band from the shortest length up (`band=1`) so every case takes it; then with the loading
+/// settings too.
 #[test]
 #[ignore]
 fn stack_matches_plain() {
     every_checkpoint_on(DEFAULT_ON, "band=512,nax=all", true);
     every_checkpoint_on(DEFAULT_ON, "band=1,nax=all", true);
+    every_checkpoint_on(DEFAULT_ON, "band=512,nax=all,directload,sharehead,parallel_load", true);
+}
+
+/// The loading settings against the round 2 default, exactly, each alone and the three
+/// together: `directload` (f16 tensors copied into MLX as they are), `sharehead` (the pruned
+/// head layer's projections as views of the full one; the default has `headprune`) and
+/// `parallel_load` (the tokenizer loaded on a second thread by `laya_core::Agent::load`).
+/// The weights are the same bits, so the outputs must be too. Each agent is loaded fresh.
+#[test]
+#[ignore]
+fn loading_settings_match_the_default() {
+    for extra in ["directload", "sharehead", "parallel_load", "directload,sharehead,parallel_load"] {
+        every_checkpoint_on(DEFAULT_ON, extra, true);
+    }
+}
+
+/// `sharehead` with the weights stored as GPU-written `[in, out]` copies (`wcopy=t`), where
+/// the q and k|v views read the full projection with its row stride, 3 times the width of a
+/// separate copy: exact too.
+#[test]
+#[ignore]
+fn sharehead_matches_with_contiguous_weights() {
+    every_checkpoint_on("headprune,wcopy=t", "sharehead", true);
+}
+
+/// `sharehead` with the weights as GPU-written copies in the checkpoint's `[out, in]` layout,
+/// viewed transposed (`wcopy=gpu`): the q and k|v views are columns of the full projection's
+/// copy, where the plain load copies each slice on its own. Exact too.
+#[test]
+#[ignore]
+fn sharehead_matches_with_gpu_copied_weights() {
+    every_checkpoint_on("headprune,wcopy=gpu", "sharehead", true);
 }
 
 /// Boolean masks on every path: `over_max_len` and `heavy_padding` pad past `4 * window`, so
