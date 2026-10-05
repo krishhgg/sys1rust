@@ -130,7 +130,7 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 | flag | environment variable | default | |
 | --- | --- | --- | --- |
 | `--model` | `SYS1_MODEL` | `typed-decisions` | a name from [Models](#models), its repo id, or a checkpoint directory |
-| `--revision` | `SYS1_REVISION` | the pinned one | serve `snapshots/<sha>` of the cached repo instead |
+| `--revision` | `SYS1_REVISION` | the pinned one | serve `snapshots/<sha>` of the cached repo instead. The pin's first 7 characters, as `sys1rust models` shows them, also mean the pin |
 | `--host` | `LAYA_HOST` | `127.0.0.1` | bind address; `laya serve` binds `0.0.0.0` |
 | `--port` | `LAYA_PORT` | `8000` | `0` picks a free port, printed on the ready line |
 | `--api-key` | `LAYA_API_KEY` | none | when set, `/v1/systemone` needs `Authorization: Bearer <key>` |
