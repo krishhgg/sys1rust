@@ -140,7 +140,7 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 
 `sys1rust` sets MLX's `MLX_MAX_MB_PER_BUFFER` to 10, measured faster on the M5, unless it is already set. At load it checks its M5 matmul kernels against MLX's, bit for bit, and prints the result on stderr. If the check fails, it uses MLX's matmuls and prints why.
 
-When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `sys1rust serve --help` lists everything.
+When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `runtime/target/release/sys1rust serve --help` lists everything.
 
 </details>
 
