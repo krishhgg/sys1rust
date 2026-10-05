@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 304" width="880" height="304" role="img" aria-labelledby="t d">
   <title id="t">Time per request on a base M5</title>
-  <desc id="d">Median time per request for the typed-decisions model, lower is better. One question over a 128-token state: sys1rust 16.6 ms, Python laya-mlx 18.9 ms, stock laya serve 53.9 ms. One question over 512 tokens: 44.1, 46.3 and 157.6 ms. Ten questions over 512 tokens: 380, 422 and 708 ms. laya serve is timed over HTTP; sys1rust and laya-mlx in-process, where sys1d's HTTP adds 0.3 ms. sys1rust and laya-mlx were measured in one session; laya serve in an earlier one.</desc>
+  <desc id="d">Median time per request for the typed-decisions model, lower is better. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. Ten questions over 512 tokens: 379, 430 and 708 ms. laya serve is timed over HTTP; sys1rust and laya-mlx in-process, where sys1d's HTTP adds 0.3 ms. sys1rust and laya-mlx were measured in one session; laya serve in an earlier one.</desc>
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
     .panel { fill: #FFFFFF; stroke: #D0D7DE; }
@@ -45,10 +45,10 @@
   <line class="grid" x1="309.3" y1="108" x2="309.3" y2="216"/>
   <line class="grid" x1="366" y1="108" x2="366" y2="216"/>
   <line class="base" x1="196" y1="108" x2="196" y2="216"/>
-  <path class="us" d="M196,116 H239.0 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H196 Z"/>
-  <text class="valb" x="249.0" y="130.5">16.6 ms</text>
-  <path class="them" d="M196,152 H245.6 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H196 Z"/>
-  <text class="val" x="255.6" y="166.5">18.9 ms</text>
+  <path class="us" d="M196,116 H235.9 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H196 Z"/>
+  <text class="valb" x="245.9" y="130.5">15.5 ms</text>
+  <path class="them" d="M196,152 H245.8 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H196 Z"/>
+  <text class="val" x="255.8" y="166.5">19.0 ms</text>
   <path class="them" d="M196,188 H344.7 a4,4 0 0 1 4,4 V204 a4,4 0 0 1 -4,4 H196 Z"/>
   <text class="val" x="354.7" y="202.5">53.9 ms</text>
   <text class="tick" x="196" y="232" text-anchor="middle">0</text>
@@ -62,10 +62,10 @@
   <line class="grid" x1="533.3" y1="108" x2="533.3" y2="216"/>
   <line class="grid" x1="590" y1="108" x2="590" y2="216"/>
   <line class="base" x1="420" y1="108" x2="420" y2="216"/>
-  <path class="us" d="M420,116 H457.7 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H420 Z"/>
-  <text class="valb" x="467.7" y="130.5">44.1 ms</text>
-  <path class="them" d="M420,152 H459.7 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H420 Z"/>
-  <text class="val" x="469.7" y="166.5">46.3 ms</text>
+  <path class="us" d="M420,116 H451.8 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H420 Z"/>
+  <text class="valb" x="461.8" y="130.5">37.9 ms</text>
+  <path class="them" d="M420,152 H461.0 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H420 Z"/>
+  <text class="val" x="471.0" y="166.5">47.6 ms</text>
   <path class="them" d="M420,188 H564.8 a4,4 0 0 1 4,4 V204 a4,4 0 0 1 -4,4 H420 Z"/>
   <text class="val" x="574.8" y="202.5">157.6 ms</text>
   <text class="tick" x="420" y="232" text-anchor="middle">0</text>
@@ -79,10 +79,10 @@
   <line class="grid" x1="757.3" y1="108" x2="757.3" y2="216"/>
   <line class="grid" x1="814" y1="108" x2="814" y2="216"/>
   <line class="base" x1="644" y1="108" x2="644" y2="216"/>
-  <path class="us" d="M644,116 H726.1 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H644 Z"/>
-  <text class="valb" x="736.1" y="130.5">380 ms</text>
-  <path class="them" d="M644,152 H735.6 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H644 Z"/>
-  <text class="val" x="745.6" y="166.5">422 ms</text>
+  <path class="us" d="M644,116 H725.8 a4,4 0 0 1 4,4 V132 a4,4 0 0 1 -4,4 H644 Z"/>
+  <text class="valb" x="735.8" y="130.5">379 ms</text>
+  <path class="them" d="M644,152 H737.5 a4,4 0 0 1 4,4 V168 a4,4 0 0 1 -4,4 H644 Z"/>
+  <text class="val" x="747.5" y="166.5">430 ms</text>
   <path class="them" d="M644,188 H800.5 a4,4 0 0 1 4,4 V204 a4,4 0 0 1 -4,4 H644 Z"/>
   <text class="val" x="810.5" y="202.5">708 ms</text>
   <text class="tick" x="644" y="232" text-anchor="middle">0</text>
@@ -91,5 +91,5 @@
   <text class="tick" x="814" y="232" text-anchor="middle">750</text>
 
   <text class="foot" x="24" y="268">laya serve is timed over HTTP. sys1rust and laya-mlx are timed in-process, and sys1d's HTTP adds 0.3 ms.</text>
-  <text class="foot" x="24" y="286">Base M5, macOS 26.2, wall power. sys1rust and laya-mlx: SPEED.md round 2, one session. laya serve: REPORT.md, an earlier session.</text>
+  <text class="foot" x="24" y="286">Base M5, macOS 26.2, wall power. sys1rust and laya-mlx: SPEED.md round 3, one session. laya serve: REPORT.md, an earlier session.</text>
 </svg>

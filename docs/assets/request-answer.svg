@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 292" width="880" height="292" role="img" aria-labelledby="t d">
   <title id="t">A request to sys1d and its answer</title>
-  <desc id="d">Left: an app sends sys1d a support message and three questions: which team should handle it (a choice of billing, tech or sales), how urgent it is (a score from none to now), and whether money is involved (a yes or no). Right: sys1d answers billing with probability 0.79, urgency 2.54 on the 0 to 3 scale, and money involved with probability 0.73, in 17 ms of inference on a base M5, with the model on the GPU and no Python.</desc>
+  <desc id="d">Left: an app sends sys1d a support message and three questions: which team should handle it (a choice of billing, tech or sales), how urgent it is (a score from none to now), and whether money is involved (a yes or no). Right: sys1d answers billing with probability 0.79, urgency 2.54 on the 0 to 3 scale, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python.</desc>
   <style>
     .win { fill: #161B22; stroke: #30363D; stroke-width: 1.5; }
     .bar { stroke: #30363D; stroke-width: 1; }
@@ -39,7 +39,7 @@
   <text class="m" x="472" y="130" xml:space="preserve">  "urgency": {"score": <tspan class="pr">2.5407</tspan>,</text>
   <text class="m" x="472" y="152" xml:space="preserve">    "legend": {"0": "none", <tspan class="dim">…</tspan>, "3": "now"}},</text>
   <text class="m" x="472" y="174" xml:space="preserve">  "money": {"noul": <tspan class="pr">0.7302</tspan>}}}</text>
-  <text class="m" x="472" y="218" xml:space="preserve"><tspan class="ok">✓</tspan> 3 questions, 17 ms of inference</text>
+  <text class="m" x="472" y="218" xml:space="preserve"><tspan class="ok">✓</tspan> 3 questions, 13 ms of inference</text>
   <text class="m dim" x="472" y="240" xml:space="preserve">  on a base M5, model on the GPU, no Python</text>
-  <text class="cap" x="472" y="268">Trimmed. 17 ms is this request's inference time.</text>
+  <text class="cap" x="472" y="268">Trimmed. 13 ms is this request's inference time.</text>
 </svg>
