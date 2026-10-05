@@ -30,9 +30,16 @@ impl Weights {
         let file = std::fs::File::open(&path)?;
         // SAFETY: the checkpoint file is treated as read-only for the life of the mapping.
         let mmap = unsafe { Mmap::map(&file)? };
-        let w = Self { mmap, path };
-        w.view()?; // validate the header eagerly
-        Ok(w)
+        // Validate the header eagerly. It also checks that the file is as long as the header
+        // says, so a file cut short (an interrupted download) fails here, with its path.
+        if let Err(e) = SafeTensors::deserialize(&mmap) {
+            return Err(Error::Weights(format!(
+                "{} ({} bytes) is truncated or not a safetensors file: {e}",
+                path.display(),
+                mmap.len()
+            )));
+        }
+        Ok(Self { mmap, path })
     }
 
     /// Parse the safetensors header. Cheap; call per use rather than caching a self-borrow.
@@ -105,4 +112,78 @@ pub fn to_f16(t: &TensorView<'_>) -> Result<Vec<f16>> {
             .collect(),
         _ => to_f32(t)?.into_iter().map(f16::from_f32).collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use safetensors::tensor::TensorView;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A fresh directory under the system temp dir, removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "laya-core-weights-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A missing file and a file cut anywhere (empty, inside the length prefix, inside the
+    /// header, inside the data, one byte short) are each an error naming the file, never a
+    /// panic; the whole file opens.
+    #[test]
+    fn open_rejects_a_missing_or_truncated_file() {
+        let data = vec![0u8; 4096];
+        let tensors = [
+            (
+                "encoder.w",
+                TensorView::new(Dtype::F16, vec![32, 32], &data[..2048]).unwrap(),
+            ),
+            (
+                "act_head.0.weight",
+                TensorView::new(Dtype::F32, vec![16, 32], &data[2048..]).unwrap(),
+            ),
+        ];
+        let bytes = safetensors::serialize(tensors, None).unwrap();
+        let header_end = 8 + u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let dir = TempDir::new();
+        let e = Weights::open(&dir.0).unwrap_err().to_string();
+        assert!(e.contains("'model.safetensors' not found in"), "{e}");
+        let path = dir.0.join("model.safetensors");
+        for cut in [
+            0,
+            4,
+            8,
+            header_end / 2,
+            header_end,
+            header_end + 100,
+            bytes.len() - 1,
+        ] {
+            std::fs::write(&path, &bytes[..cut]).unwrap();
+            let e = Weights::open(&dir.0).unwrap_err().to_string();
+            assert!(
+                e.contains(&format!(
+                    "model.safetensors ({cut} bytes) is truncated or not a safetensors file"
+                )),
+                "cut at {cut}: {e}"
+            );
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(Weights::open(&dir.0).unwrap().names().unwrap().len(), 2);
+    }
 }
