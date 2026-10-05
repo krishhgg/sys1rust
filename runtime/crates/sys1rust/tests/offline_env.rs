@@ -1,12 +1,16 @@
 //! `HF_HUB_OFFLINE` turns downloads off for `serve` and `pull` only when huggingface_hub would
-//! read it as true. One test sets the variable in this process, so the binary checks give
-//! their children the value they need instead of inheriting it.
+//! read it as true. Offline `pull` still prints the directory of a complete snapshot. One test
+//! sets the variable in this process, so the binary checks give their children the value they
+//! need instead of inheriting it.
 
 use clap::Parser;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::os::unix::fs::symlink;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use sys1rust::cli::{offline_from_env, Cli, Command as Sub};
+use sys1rust::models;
 
 #[test]
 fn hf_hub_offline_reads_like_huggingface_hub() {
@@ -47,19 +51,39 @@ fn spawn(args: &[&str], offline: &str, cache: &Path) -> Child {
         .env_remove("SYS1_MODEL")
         .env_remove("SYS1_REVISION")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap()
 }
 
-/// Exit code and stderr of a child that stops by itself.
-fn finish(child: Child) -> (Option<i32>, String) {
+/// Exit code, stdout and stderr of a child that stops by itself.
+fn finish(child: Child) -> (Option<i32>, String, String) {
     let out = child.wait_with_output().unwrap();
     (
         out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into(),
         String::from_utf8_lossy(&out.stderr).into(),
     )
+}
+
+/// A pinned typed-decisions snapshot that `LayaModel::status` calls complete, as in
+/// closed_stdout.rs. The status check reads sizes only, so the blobs are sparse files of the
+/// manifest sizes. Returns the snapshot directory.
+fn fake_typed_decisions(cache: &Path) -> PathBuf {
+    let model = models::find("typed-decisions").unwrap();
+    let snapshot = model.snapshot_dir(cache);
+    for file in model.files {
+        let blob = model.blob_path(cache, file);
+        fs::create_dir_all(blob.parent().unwrap()).unwrap();
+        File::create(&blob).unwrap().set_len(file.size).unwrap();
+        let up = "../".repeat(2 + file.path.matches('/').count());
+        let link = snapshot.join(file.path);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(format!("{up}blobs/{}", file.blob), &link).unwrap();
+    }
+    assert_eq!(model.status(cache), models::Status::Complete);
+    snapshot
 }
 
 /// stderr lines up to the first that contains `needle`, then kill the child. The downloader
@@ -82,16 +106,34 @@ fn lines_until(mut child: Child, needle: &str) -> Vec<String> {
 #[test]
 fn a_true_value_stops_pull_and_serve_downloads() {
     let cache = tempfile::tempdir().unwrap();
-    let (code, stderr) = finish(spawn(&["pull", "typed-decisions"], "1", cache.path()));
+    let (code, stdout, stderr) = finish(spawn(&["pull", "typed-decisions"], "1", cache.path()));
     assert_eq!(code, Some(1), "{stderr}");
     assert!(
-        stderr.contains("sys1rust: error: HF_HUB_OFFLINE is on"),
+        stderr.contains(
+            "sys1rust: error: HF_HUB_OFFLINE is on, so nothing is downloaded; unset it to pull typed-decisions"
+        ),
         "{stderr}"
     );
+    assert_eq!(stdout, "");
     let serve = ["serve", "--model", "typed-decisions", "--port", "0"];
-    let (code, stderr) = finish(spawn(&serve, "ON", cache.path()));
+    let (code, _, stderr) = finish(spawn(&serve, "ON", cache.path()));
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("downloads are off"), "{stderr}");
+}
+
+#[test]
+fn offline_pull_prints_a_complete_snapshot_and_refuses_a_partial_one() {
+    let cache = tempfile::tempdir().unwrap();
+    let snapshot = fake_typed_decisions(cache.path());
+    let (code, stdout, stderr) = finish(spawn(&["pull", "typed-decisions"], "1", cache.path()));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, format!("{}\n", snapshot.display()));
+    assert_eq!(stderr, "");
+    fs::remove_file(snapshot.join("tokenizer/tokenizer.json")).unwrap();
+    let (code, stdout, stderr) = finish(spawn(&["pull", "typed-decisions"], "1", cache.path()));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("HF_HUB_OFFLINE is on"), "{stderr}");
+    assert_eq!(stdout, "");
 }
 
 #[test]

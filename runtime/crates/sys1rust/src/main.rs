@@ -1,7 +1,8 @@
 //! `sys1rust` entry point. `serve` sets the MLX environment defaults the user has not set,
 //! resolves the checkpoint, loads and warms it on the inference thread, binds, prints the
 //! one-line JSON ready event to stdout, serves until SIGINT/SIGTERM, then finishes in-flight
-//! requests and exits 0. `pull` downloads a model and prints its snapshot directory. `models`
+//! requests and exits 0. `pull` downloads a model and prints its snapshot directory. With
+//! `HF_HUB_OFFLINE` on, it prints the directory only when the snapshot is complete. `models`
 //! prints the Laya models table to stdout. Everything human-readable goes to stderr.
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -61,13 +62,18 @@ fn pull_cmd(args: &PullArgs) -> Result<()> {
             args.model
         )
     })?;
-    if offline_from_env() {
+    let cache = hf_cache_dir();
+    // A complete snapshot needs no download, so HF_HUB_OFFLINE matters only when it is not.
+    let dir = if model.status(&cache) == models::Status::Complete {
+        model.snapshot_dir(&cache)
+    } else if offline_from_env() {
         bail!(
             "HF_HUB_OFFLINE is on, so nothing is downloaded; unset it to pull {}",
             model.name
         );
-    }
-    let dir = Hub::from_env().ensure(&hf_cache_dir(), model, &mut Progress::stderr())?;
+    } else {
+        Hub::from_env().ensure(&cache, model, &mut Progress::stderr())?
+    };
     print_out(&format!("{}\n", dir.display()), "the snapshot directory")
 }
 

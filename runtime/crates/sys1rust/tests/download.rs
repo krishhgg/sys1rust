@@ -7,10 +7,10 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use sys1rust::download::{Hub, Progress};
+use sys1rust::download::{blob_name_of, Hub, Progress};
 use sys1rust::models::{incomplete_path, LayaModel, ModelFile, Status};
 
 /// What the fake hub does for one path.
@@ -287,6 +287,93 @@ fn a_hash_mismatch_keeps_nothing() {
     let blob = m.blob_path(c, &m.files[0]);
     assert!(!blob.exists() && !incomplete_path(&blob).exists());
     assert!(std::fs::symlink_metadata(m.snapshot_dir(c).join("model.safetensors")).is_err());
+    // A download that started from byte 0 and hashes wrong is not tried again.
+    assert_eq!(hub.requests_for(&url_path(m, 0)).len(), 1);
+}
+
+#[test]
+fn a_cached_blob_with_wrong_bytes_is_downloaded_again() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    // A blob of the right size but the wrong bytes, and no snapshot link to it.
+    let blob = m.blob_path(c, &m.files[0]);
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(&blob, vec![7u8; weights.len()]).unwrap();
+    let snap = client(&hub).ensure(c, m, &mut quiet()).unwrap();
+    let seen = hub.requests_for(&url_path(m, 0));
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].range, None);
+    let link = snap.join("model.safetensors");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        Path::new("../../blobs").join(m.files[0].blob)
+    );
+    assert_eq!(
+        blob_name_of(&link, m.files[0].blob).unwrap(),
+        m.files[0].blob
+    );
+    assert_eq!(std::fs::read(&link).unwrap(), weights);
+}
+
+/// Wrong bytes an earlier run left in `model.safetensors`'s `.incomplete`, shorter than the
+/// file. Returns the cache's blob path.
+fn seed_bad_partial(c: &Path, m: &LayaModel) -> PathBuf {
+    let blob = m.blob_path(c, &m.files[0]);
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(incomplete_path(&blob), vec![7u8; 1000]).unwrap();
+    blob
+}
+
+#[test]
+fn a_bad_partial_file_from_an_earlier_run_starts_over() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    let blob = seed_bad_partial(c, m);
+    let snap = client(&hub).ensure(c, m, &mut quiet()).unwrap();
+    // The GET resumes from the bad bytes, the hash fails, and one GET starts the file over.
+    let seen = hub.requests_for(&url_path(m, 0));
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].range.as_deref(), Some("bytes=1000-"));
+    assert_eq!(seen[1].range, None);
+    assert_eq!(
+        blob_name_of(&blob, m.files[0].blob).unwrap(),
+        m.files[0].blob
+    );
+    assert_eq!(
+        std::fs::read(snap.join("model.safetensors")).unwrap(),
+        weights
+    );
+    assert!(!incomplete_path(&blob).exists());
+}
+
+#[test]
+fn a_bad_partial_file_starts_over_only_once() {
+    let (m, weights, tokenizer) = tiny_model();
+    let mut wrong = weights.clone();
+    wrong[100_000] ^= 1;
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &wrong, &tokenizer);
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    let blob = seed_bad_partial(c, m);
+    let e = client(&hub).ensure(c, m, &mut quiet()).unwrap_err();
+    let msg = format!("{e:#}");
+    assert!(
+        msg.contains(&format!("expected {}", m.files[0].blob)),
+        "{msg}"
+    );
+    // The resumed GET, then 1 GET from byte 0 that also hashes wrong.
+    let seen = hub.requests_for(&url_path(m, 0));
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].range.as_deref(), Some("bytes=1000-"));
+    assert_eq!(seen[1].range, None);
+    assert!(!blob.exists() && !incomplete_path(&blob).exists());
 }
 
 #[test]

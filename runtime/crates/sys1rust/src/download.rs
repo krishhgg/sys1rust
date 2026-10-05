@@ -3,7 +3,9 @@
 //! `snapshots/<revision>/<path>` is a relative symlink to it. A download writes
 //! `blobs/<blob>.incomplete` while holding `.locks/<repo folder>/<blob>.lock` (the lock
 //! huggingface_hub takes), resumes with `Range`, and renames the file into place only after
-//! its size and hash match the manifest.
+//! its size and hash match the manifest. When an earlier run's partial file hashes wrong, the
+//! downloader starts that file over once. It also hashes a blob that is in the cache but not
+//! linked from the snapshot before it links to that blob.
 
 use crate::models::{file_size, incomplete_path, mb, repo_folder, LayaModel, ModelFile};
 use anyhow::{anyhow, bail, Context, Result};
@@ -99,7 +101,7 @@ impl Hub {
     }
 
     /// Put every file of `model` into `cache` and return the snapshot directory. A file
-    /// already in the snapshot at its size costs no request.
+    /// already in the snapshot at its size costs no request and no hashing.
     pub fn ensure<W: Write>(
         &self,
         cache: &Path,
@@ -144,8 +146,12 @@ impl Hub {
             .with_context(|| format!("open {}", lock_path.display()))?;
         lock.lock()
             .with_context(|| format!("lock {}", lock_path.display()))?;
-        // Another process may have finished this blob while this one waited.
-        if file_size(&blob) != Some(file.size) {
+        // Another process may have finished this file while this one waited. It hashed the
+        // blob before it made the link, so this one checks the size only.
+        if file_size(&link) == Some(file.size) {
+            return Ok(());
+        }
+        if !cached_blob_ok(&blob, file, progress)? {
             self.download_blob(model, file, &blob, progress)?;
         }
         // The lock also covers the link, so 2 downloaders never replace each other's link.
@@ -162,18 +168,58 @@ impl Hub {
     ) -> Result<()> {
         let part = incomplete_path(blob);
         let url = self.file_url(model, file);
+        // Whether `part` holds bytes an earlier run wrote. Only the hash at the end shows
+        // whether they are right. `fetch` clears this when it starts `part` over from byte 0.
+        let mut inherited = file_size(&part).is_some_and(|n| n > 0);
+        loop {
+            self.fetch_all(&url, &part, file, &mut inherited, progress)?;
+            let got = blob_name_of(&part, file.blob)
+                .with_context(|| format!("hash {}", part.display()))?;
+            if got == file.blob {
+                return fs::rename(&part, blob)
+                    .with_context(|| format!("rename {} to {}", part.display(), blob.display()));
+            }
+            if !inherited {
+                // This call wrote every byte from 0, so the server sent the wrong file.
+                let _ = fs::remove_file(&part);
+                bail!(
+                    "{} hashes to {got}, expected {}; deleted the download",
+                    file.path,
+                    file.blob
+                );
+            }
+            // An earlier run left wrong bytes in `part`. Start the file over. `inherited` stays
+            // false from here on, so a second mismatch fails above instead of looping.
+            progress.note(&format!(
+                "{}: the partial download from an earlier run hashes to {got}, expected {}; starting it over",
+                file.path, file.blob
+            ));
+            fs::remove_file(&part).with_context(|| format!("remove {}", part.display()))?;
+            inherited = false;
+        }
+    }
+
+    /// GETs into `part` until it holds `file.size` bytes or the attempts run out.
+    fn fetch_all<W: Write>(
+        &self,
+        url: &str,
+        part: &Path,
+        file: &ModelFile,
+        inherited: &mut bool,
+        progress: &mut Progress<W>,
+    ) -> Result<()> {
         let mut attempt = 1;
         // A GET counts as progress only when it takes `part` past the most bytes it has held
         // in this call, starting from what an earlier run left. A server that ignores `Range`
         // restarts the file on every GET, and this way it still runs out of attempts.
-        let mut furthest = file_size(&part).filter(|&n| n <= file.size).unwrap_or(0);
+        let mut furthest = file_size(part).filter(|&n| n <= file.size).unwrap_or(0);
         loop {
-            match self.fetch(&url, &part, file, progress) {
-                Ok(()) => break,
+            match self.fetch(url, part, file, inherited, progress) {
+                Ok(()) => return Ok(()),
                 // The GET added bytes before it stopped, for example at BODY_BUDGET, so go on
                 // from there at once.
-                Err(Failure::Retry(_)) if file_size(&part).unwrap_or(0) > furthest => {
-                    furthest = file_size(&part).unwrap_or(0);
+                Err(Failure::Retry(_)) if file_size(part).unwrap_or(0) > furthest => {
+                    furthest = file_size(part).unwrap_or(0);
                     attempt = 1;
                 }
                 Err(Failure::Retry(e)) if attempt < ATTEMPTS => {
@@ -184,26 +230,16 @@ impl Hub {
                 Err(Failure::Retry(e) | Failure::Fatal(e)) => return Err(e),
             }
         }
-        let got =
-            blob_name_of(&part, file.blob).with_context(|| format!("hash {}", part.display()))?;
-        if got != file.blob {
-            let _ = fs::remove_file(&part);
-            bail!(
-                "{} hashes to {got}, expected {}; deleted the download",
-                file.path,
-                file.blob
-            );
-        }
-        fs::rename(&part, blob)
-            .with_context(|| format!("rename {} to {}", part.display(), blob.display()))
     }
 
-    /// One GET into `part`, continuing from the bytes already there.
+    /// One GET into `part`, continuing from the bytes already there. Sets `inherited` to false
+    /// when it starts `part` over from byte 0.
     fn fetch<W: Write>(
         &self,
         url: &str,
         part: &Path,
         file: &ModelFile,
+        inherited: &mut bool,
         progress: &mut Progress<W>,
     ) -> std::result::Result<(), Failure> {
         let fatal =
@@ -215,6 +251,7 @@ impl Hub {
         }
         if have > file.size {
             fs::remove_file(part).map_err(fatal)?;
+            *inherited = false;
             have = 0;
         }
         let mut req = self.agent.get(url);
@@ -239,6 +276,7 @@ impl Hub {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(fatal(e)),
                 }
+                *inherited = false;
                 return Err(Failure::Retry(anyhow!("unexpected Content-Range from {url}")));
             }
             429 | 500..=599 => return Err(Failure::Retry(anyhow!("HTTP {status} from {url}"))),
@@ -260,6 +298,9 @@ impl Hub {
             File::create(part)
         }
         .map_err(fatal)?;
+        if !append {
+            *inherited = false;
+        }
         let mut done = if append { have } else { 0 };
         progress.start(file.path, file.size, done);
         let mut body = resp.body_mut().as_reader();
@@ -309,6 +350,29 @@ fn content_range_start(resp: &ureq::http::Response<ureq::Body>) -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+/// Whether `blob` already holds `file`'s bytes, by size and then by hash. This deletes a blob
+/// of the right size that hashes wrong, so the caller downloads it again. The caller holds
+/// the blob's lock.
+fn cached_blob_ok<W: Write>(
+    blob: &Path,
+    file: &ModelFile,
+    progress: &mut Progress<W>,
+) -> Result<bool> {
+    if file_size(blob) != Some(file.size) {
+        return Ok(false);
+    }
+    let got = blob_name_of(blob, file.blob).with_context(|| format!("hash {}", blob.display()))?;
+    if got == file.blob {
+        return Ok(true);
+    }
+    progress.note(&format!(
+        "{}: the cached blob hashes to {got}, expected {}; downloading it again",
+        file.path, file.blob
+    ));
+    fs::remove_file(blob).with_context(|| format!("remove {}", blob.display()))?;
+    Ok(false)
 }
 
 /// `snapshots/<rev>/<path>` -> `../../blobs/<blob>`, with one more `..` per folder in `path`:
