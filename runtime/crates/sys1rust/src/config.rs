@@ -51,7 +51,8 @@ pub struct Config {
     pub model: String,
     /// Load `snapshots/<sha>` of the cached repo instead of the revision pinned in
     /// bench/models.lock.json. sys1rust only ever downloads the pinned revision. A single
-    /// directory name: letters, digits, `.`, `_` and `-`, not `.` or `..`.
+    /// directory name: letters, digits, `.`, `_` and `-`, not `.` or `..`. The pin's first 7
+    /// or more characters also name the pin.
     #[arg(long, env = "SYS1_REVISION")]
     pub revision: Option<String>,
     /// Bind address. Upstream defaults to 0.0.0.0; this is a local runtime.
@@ -237,16 +238,18 @@ pub fn resolve_served(model: &str, revision: Option<&str>) -> Result<ServedModel
     resolve_served_in(&hf_cache_dir(), model, revision)
 }
 
-/// [`resolve_served`] in `cache`. A Laya model without `--revision`, or with its pinned one,
-/// loads the pinned snapshot, and the error is a [`NotDownloaded`] when the cache does not
-/// have all of it. Any other revision must already be in the cache.
+/// [`resolve_served`] in `cache`. A Laya model without `--revision`, or with its pinned one or
+/// 7 or more leading characters of it, loads the pinned snapshot, and the error is a
+/// [`NotDownloaded`] when the cache does not have all of it. Any other revision must already
+/// be in the cache.
 pub fn resolve_served_in(cache: &Path, model: &str, revision: Option<&str>) -> Result<ServedModel> {
     let model = model.trim();
     if let Some(laya) = models::find(model) {
         let dir = match revision {
             Some(rev) => {
                 check_revision(rev)?;
-                if rev == laya.revision {
+                // `sys1rust models` prints the pin's first 7 characters.
+                if rev.len() >= 7 && laya.revision.starts_with(rev) {
                     pinned_dir(cache, laya)?
                 } else {
                     let snap = laya.repo_dir(cache).join("snapshots").join(rev);
@@ -525,6 +528,33 @@ mod tests {
             msg.contains(m.revision) && msg.contains("not fully downloaded"),
             "{msg}"
         );
+    }
+
+    /// `sys1rust models` shows the pin's first 7 characters, so `--revision` takes them too.
+    #[test]
+    fn a_7_character_prefix_names_the_pin() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        let short = &m.revision[..7];
+        let e = resolve_served_in(cache.path(), "typed-decisions", Some(short)).unwrap_err();
+        assert!(e.downcast_ref::<NotDownloaded>().is_some(), "{e:#}");
+        let snap = fake_snapshot(cache.path(), m, m.revision);
+        let s = resolve_served_in(cache.path(), "typed-decisions", Some(short)).unwrap();
+        assert_eq!(s.dir, snap);
+        assert_eq!(s.revision.as_deref(), Some(m.revision));
+    }
+
+    #[test]
+    fn a_shorter_or_unrelated_revision_is_not_the_pin() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        fake_snapshot(cache.path(), m, m.revision);
+        let unrelated = if m.revision.starts_with('0') { "1111111" } else { "0000000" };
+        for rev in [&m.revision[..6], unrelated] {
+            let e = resolve_served_in(cache.path(), "typed-decisions", Some(rev)).unwrap_err();
+            assert!(e.downcast_ref::<NotDownloaded>().is_none(), "{rev}: {e:#}");
+            assert!(e.to_string().contains("not in the local HF cache"), "{rev}: {e}");
+        }
     }
 
     #[test]

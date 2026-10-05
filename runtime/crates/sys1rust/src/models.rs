@@ -98,7 +98,9 @@ impl LayaModel {
         self.repo_dir(cache).join("blobs").join(file.blob)
     }
 
-    /// Checks sizes only, so a call costs a few `stat`s even for an 846 MB snapshot.
+    /// Checks sizes only, so a call costs a few `stat`s even for an 846 MB snapshot. Hashing the
+    /// weights takes about 0.4 s on an M5, more than the whole 0.25 to 0.38 s start, and the
+    /// downloader already checks each blob's hash when it writes the blob.
     pub fn status(&self, cache: &Path) -> Status {
         let snapshot = self.snapshot_dir(cache);
         let mut complete = true;

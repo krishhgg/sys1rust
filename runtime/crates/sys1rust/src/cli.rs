@@ -4,13 +4,15 @@
 use crate::config::Config;
 use clap::{Parser, Subcommand};
 
-/// `--version` text after the name: `0.1.0 (MLX 0.32.2, macos26 build)`. The MLX version is
-/// fixed because vendor/mlx-sys/build.rs refuses a prebuilt MLX of any other version. The
+/// `--version` text after the name: `0.1.0 (MLX 0.32.2, macos26 build)`. build.rs reads the
+/// MLX version from `MLX_VERSION` in vendor/mlx-sys/build.rs, which refuses any other MLX. The
 /// build name comes from `SYS1_BUILD_FLAVOR` at compile time (packaging/build.sh sets
 /// `macos14` or `macos26`) and is `source` otherwise.
 pub const VERSION_LINE: &str = concat!(
     env!("CARGO_PKG_VERSION"),
-    " (MLX 0.32.2, ",
+    " (MLX ",
+    env!("SYS1RUST_MLX_VERSION"),
+    ", ",
     env!("SYS1RUST_BUILD_FLAVOR"),
     " build)"
 );
@@ -63,7 +65,15 @@ mod tests {
         let e = parse(&["--version"]).unwrap_err();
         assert_eq!(e.kind(), ErrorKind::DisplayVersion);
         let text = e.to_string();
-        let want = format!("sys1rust {} (MLX 0.32.2, ", env!("CARGO_PKG_VERSION"));
+        let mlx = env!("SYS1RUST_MLX_VERSION");
+        assert!(
+            mlx.contains('.')
+                && mlx
+                    .split('.')
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "{mlx:?}"
+        );
+        let want = format!("sys1rust {} (MLX {mlx}, ", env!("CARGO_PKG_VERSION"));
         // build.rs names an unset or empty SYS1_BUILD_FLAVOR `source`.
         let build = text
             .trim_end()

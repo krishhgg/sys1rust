@@ -2,6 +2,7 @@
 """Print the MODELS table of runtime/crates/sys1rust/src/models.rs from a Hugging Face cache
 that holds the snapshots pinned in bench/models.lock.json. The script checks every blob name
 against the file's bytes. It uses sha256 for an LFS file and the git blob sha1 otherwise.
+It reads each blob name from a snapshot symlink, so it needs a symlinked cache, not a copy.
 
 Usage: packaging/gen_manifest.py [HF_HUB_CACHE]
 """
@@ -51,6 +52,10 @@ def main():
         print("        files: &[")
         for path in FILES:
             full = os.path.join(snap, path)
+            if not os.path.islink(full):
+                sys.exit(f"{full}: not a symlink. The generator reads blob names from the snapshot "
+                         "links that huggingface_hub writes, so it needs a cache that "
+                         "`hf download` filled, not a copy.")
             blob = os.path.basename(os.readlink(full))
             if not matches(full, blob):
                 sys.exit(f"{full}: its bytes do not hash to the blob name {blob}")
