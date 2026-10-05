@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  sys1rust runs Laya's decision models locally on Apple silicon. Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability, in about 17 ms of inference on a base M5. Its server, <code>sys1d</code>, speaks the same <code>/v1/systemone</code> API as upstream <code>laya serve</code>, so Jev and Laya clients can point at it without changes.
+  sys1rust runs Laya's decision models locally on Apple silicon. Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability, in about 13 ms of inference on a base M5. Its server, <code>sys1d</code>, speaks the same <code>/v1/systemone</code> API as upstream <code>laya serve</code>, so Jev and Laya clients can point at it without changes.
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/request-answer.svg" alt="An app sends sys1d a support message and three questions: which team should handle it, how urgent it is, and whether money is involved. sys1d answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 17 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
+  <img src="docs/assets/request-answer.svg" alt="An app sends sys1d a support message and three questions: which team should handle it, how urgent it is, and whether money is involved. sys1d answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
 </p>
 
 ## Build
@@ -65,7 +65,7 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 }'
 ```
 
-On the base M5, inference for this request took 16.4 to 18.4 ms over 6 runs. That is the `X-Inference-Time-Ms` header, which `curl -si` shows. It covers tokenizing, running the model and decoding. It leaves out reading and checking the request, waiting for the GPU and writing the reply.
+On the base M5, inference for this request took 13.0 to 13.3 ms over 18 runs, 6 in each of 3 fresh processes after 2 warm-up requests. That is the `X-Inference-Time-Ms` header, which `curl -si` shows. It covers tokenizing, running the model and decoding. It leaves out reading and checking the request, waiting for the GPU and writing the reply.
 
 Each question gets one of three answer types:
 
@@ -91,26 +91,26 @@ Don't compare the two against the same threshold. `action.act_probability` comes
 - **It checks requests the way `laya serve` does**, with the same limits, error codes and `detail` strings. It checks the API key first, then takes a slot, then reads and checks the body.
 - **The GPU runs one request at a time.** `sys1d` holds up to 16 requests (`LAYA_MAX_CONCURRENT`), one running and the rest waiting their turn. A request that arrives while all 16 slots are held gets `503` with `Retry-After: 1` at once, so clients must retry it. More clients don't get more throughput, since one request already fills the GPU.
 - **All the questions in a request go through the model together**, one row per question, in fp16.
-- **It beats Python MLX by doing less work, not by being Rust.** It skips computing on padding, runs the decision head's last layer only at the positions the answer reads, and uses dense attention where that is cheaper. The answers don't change.
+- **It beats Python MLX by doing less work and tuning its matmuls, not by being Rust.** It skips computing on padding, runs the decision head's last layer only at the positions the answer reads, uses dense attention where that is cheaper, and from 512 tokens computes local attention only over the keys each window reaches. Its matmuls run MLX's own kernels for the M5's matrix units, with tile sizes tuned on this M5. The answers don't change.
 - **It reads models from the local Hugging Face cache.** `sys1d` never downloads.
 
 ## Speed
 
 <p align="center">
-  <img src="docs/assets/speed.svg" alt="Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 16.6 ms, Python laya-mlx 18.9 ms, stock laya serve 53.9 ms. One question over 512 tokens: 44.1, 46.3 and 157.6 ms. Ten questions over 512 tokens: 380, 422 and 708 ms." width="880">
+  <img src="docs/assets/speed.svg" alt="Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. Ten questions over 512 tokens: 379, 430 and 708 ms." width="880">
 </p>
 
 | median ms | 1 question, 128 tokens | 1 question, 512 tokens | 10 questions, 512 tokens |
 | --- | --- | --- | --- |
-| sys1rust | 16.6 | 44.1 | 380 |
-| laya-mlx, Python MLX at its fastest (compiled, buffer cache capped) | 18.9 | 46.3 | 422 |
+| sys1rust | 15.5 | 37.9 | 379 |
+| laya-mlx, Python MLX at its fastest (compiled, buffer cache capped) | 19.0 | 47.6 | 430 |
 | `laya serve`, stock, over HTTP | 53.9 | 157.6 | 708 |
 
-- **Against stock `laya serve`**, it is 1.9 to 3.5x faster per request, counting `sys1d`'s 0.3 ms of HTTP. The `laya serve` times come from the bake-off ([`REPORT.md`](results/REPORT.md)), an earlier session than the round 2 sys1rust times, and separate runs on this laptop vary by about 5%. In earlier runs, `sys1d` sustained 7.9 requests/s over 5 minutes, and `laya serve` 3.54 over 2 minutes. `laya serve` runs fp32 for requests with fewer than 5 questions, but even upstream in fp16, which it doesn't ship, is 1.9 to 2.7x slower on these three sizes, also against times from an earlier session.
-- **Against Python laya-mlx at its fastest**, it is 1.17x faster, and faster on all 12 benchmark sizes, by 5 to 48%.
+- **Against stock `laya serve`**, it is 1.9 to 4.1x faster per request, counting `sys1d`'s 0.3 ms of HTTP. The `laya serve` times come from the bake-off ([`REPORT.md`](results/REPORT.md)), an earlier session than the round 3 sys1rust times, and separate runs on this laptop vary by about 5%. In earlier runs, `sys1d` sustained 7.9 requests/s over 5 minutes, and `laya serve` 3.54 over 2 minutes. `laya serve` runs fp32 for requests with fewer than 5 questions, but even upstream in fp16, which it doesn't ship, is 1.9 to 2.9x slower on these three sizes, also against times from an earlier session.
+- **Against Python laya-mlx at its fastest**, it is 1.25x faster, and faster on all 12 benchmark sizes, by 13 to 55%.
 - **It gives the same answers.** On the 1,500-answer correctness workload, 1,498 agree with the upstream PyTorch fp32 reference (99.9%, above the 99% gate). The two that differ are near ties.
 - **Its tail stays close to the median.** In the timing runs, no request took more than twice the median for its size. Python MLX without a capped cache had 9% of requests over that line.
-- **It starts fast and is small.** From process start to the first answer takes 243 to 375 ms, with the model files already in the OS file cache. `sys1d` is a 5 MB binary, and its HTTP layer adds 0.3 ms per request.
+- **It starts fast and is small.** From process start to the first answer takes 243 to 375 ms, with the model files already in the OS file cache. `sys1d` is a 5 MB binary, and its HTTP layer adds 0.3 ms per request. macOS caches the compiled GPU kernels by the binary's path and the kernel source, so the first start from a new path or after a kernel change takes about 1.7 s longer.
 
 Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on macOS 26.2 and wall power. Other chips are untested. The write-ups are in [`results/`](results/README.md). They run from the bake-off of 13 existing runtimes ([`REPORT.md`](results/REPORT.md)) to the speed round ([`SPEED.md`](results/SPEED.md)).
 
@@ -141,6 +141,8 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 | `--max-concurrent` | `LAYA_MAX_CONCURRENT` | `16` | requests held at once; the next one gets `503` |
 | `--tuning` | `SYS1_MLX_TUNING` | the measured default | engine settings, see `Knobs` in `runtime/crates/laya-mlx` |
 | `--f32` | `SYS1_F32` | off | run the transformer in f32 instead of the checkpoint's f16 |
+
+`sys1d` sets MLX's `MLX_MAX_MB_PER_BUFFER` to 10, measured faster on the M5, unless it is already set. At load it checks its M5 matmul kernels against MLX's, bit for bit, and prints the result on stderr. If the check fails, it uses MLX's matmuls and prints why.
 
 When it's ready, `sys1d` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `runtime/target/release/sys1d --help` lists everything.
 
