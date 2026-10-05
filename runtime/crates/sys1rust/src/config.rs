@@ -43,7 +43,7 @@ pub const PUBLISHED_MODEL_IDS: [(&str, &str); 2] = [
 
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "sys1d",
+    name = "sys1rust",
     about = "Local HTTP server for Laya System 1 decisions (POST /v1/systemone, GET /health)"
 )]
 pub struct Config {
@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn defaults_and_env_style_flags_parse() {
-        let c = Config::try_parse_from(["sys1d"]).unwrap();
+        let c = Config::try_parse_from(["sys1rust"]).unwrap();
         assert_eq!(c.model, "typed-decisions");
         assert_eq!((c.host.as_str(), c.port), ("127.0.0.1", 8000));
         assert_eq!(c.max_concurrent(), 16);
@@ -433,7 +433,7 @@ mod tests {
         assert!(c.backend_options().parallel_load().unwrap());
         assert!(!c.f32 && c.api_key().is_none() && c.revision().is_none());
         let c = Config::try_parse_from([
-            "sys1d",
+            "sys1rust",
             "--port",
             "0",
             "--max-concurrent",
@@ -447,6 +447,6 @@ mod tests {
         assert_eq!(c.max_concurrent(), 16);
         assert!(c.api_key().is_none());
         assert!(c.backend_options().f32);
-        assert!(Config::try_parse_from(["sys1d", "--port", "70000"]).is_err());
+        assert!(Config::try_parse_from(["sys1rust", "--port", "70000"]).is_err());
     }
 }

@@ -1,4 +1,4 @@
-//! `sys1d`: a local HTTP server for the sys1rust runtime that speaks upstream Laya's
+//! `sys1rust`: a local HTTP server for the sys1rust runtime that speaks upstream Laya's
 //! `/v1/systemone` protocol (see `laya_serve.py` and `docs/http-api.md` upstream).
 //!
 //! The binary in `main.rs` wires these pieces together; they are a library so the HTTP layer
@@ -22,7 +22,7 @@ pub use worker::{Predictor, Worker, WorkerHandle};
 
 /// Write one human-readable log line to stderr (stdout is reserved for the ready line).
 pub fn log(msg: impl AsRef<str>) {
-    eprintln!("sys1d: {}", msg.as_ref());
+    eprintln!("sys1rust: {}", msg.as_ref());
 }
 
 /// Fold line breaks in client-controlled text so it cannot forge log entries.

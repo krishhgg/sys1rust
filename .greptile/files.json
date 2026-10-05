@@ -7,7 +7,7 @@
     {
       "path": "results/SPEED.md",
       "description": "Measured effect and cost of the laya-mlx speed settings (dense_upto, headprune, unpad, in round 2 the fuserope Metal kernel, in round 3 band, nax, the loading settings and MLX_MAX_MB_PER_BUFFER) and the reviews that made them default",
-      "scope": ["runtime/crates/laya-mlx/**", "runtime/crates/sys1-bench/**", "runtime/crates/sys1d/src/config.rs", "runtime/crates/sys1d/src/main.rs"]
+      "scope": ["runtime/crates/laya-mlx/**", "runtime/crates/sys1-bench/**", "runtime/crates/sys1rust/src/config.rs", "runtime/crates/sys1rust/src/main.rs"]
     },
     {
       "path": "results/SPIKE.md",
@@ -16,8 +16,8 @@
     },
     {
       "path": "results/SERVER.md",
-      "description": "sys1d server design choices, protocol parity with upstream laya serve, measured overhead",
-      "scope": ["runtime/crates/sys1d/**"]
+      "description": "sys1rust server design choices, protocol parity with upstream laya serve, measured overhead",
+      "scope": ["runtime/crates/sys1rust/**"]
     },
     {
       "path": "bench/PLAN.md",

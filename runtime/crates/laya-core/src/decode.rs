@@ -261,7 +261,7 @@ pub fn act_features(logits_row: &[f32], marker_count: usize) -> [f32; 4] {
 /// Upstream's error for a float that is not finite in the result. `laya serve` builds
 /// `JSONResponse(content=result)` inside its `try` block, Starlette renders it with
 /// `json.dumps(allow_nan=False)`, and the `ValueError` that raises (for a value or a dict
-/// key alike) is what the handler turns into a 422 with `detail = str(e)`. sys1d maps
+/// key alike) is what the handler turns into a 422 with `detail = str(e)`. sys1rust maps
 /// `Error::Question` to the same status and detail, so the client sees upstream's text.
 fn out_of_range(x: f64) -> Error {
     Error::Question(format!(

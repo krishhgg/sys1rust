@@ -141,7 +141,7 @@ impl Worker {
         // and repr recurse once per level), copies criteria into the result and serializes
         // it, so its stack is sized for MAX_JSON_DEPTH.
         let thread = std::thread::Builder::new()
-            .name("sys1d-infer".into())
+            .name("sys1rust-infer".into())
             .stack_size(DEEP_STACK)
             .spawn(move || run(factory, rx, ready_tx))
             .expect("spawn inference thread");

@@ -33,7 +33,7 @@ use std::sync::Mutex;
 /// The settings the work reductions are measured against (`results/SPEED.md`). Their answers
 /// against the upstream fp32 reference are checked in `tests/reference.rs`.
 const BASE: &str = "f16gelu,cache=512,wired=2048";
-/// What sys1d's round 2 default adds to `BASE`: `BASE` plus this is the default the round 3
+/// What sys1rust's round 2 default adds to `BASE`: `BASE` plus this is the default the round 3
 /// settings are checked against, bit for bit.
 const DEFAULT_ON: &str = "dense_upto=1024,headprune,unpad,fuserope";
 const TOL: f64 = 1e-3;
@@ -429,7 +429,7 @@ fn fuserope_matches_plain() {
     every_checkpoint("fuserope", true);
 }
 
-/// The `fuserope` kernel on the packed layout, the round 2 default of sys1d: with `unpad` the
+/// The `fuserope` kernel on the packed layout, the round 2 default of sys1rust: with `unpad` the
 /// kernel also does the expand through the packing's index.
 #[test]
 #[ignore]

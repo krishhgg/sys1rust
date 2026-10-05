@@ -1,6 +1,6 @@
 //! Live end-to-end test (ignored by default; needs the typed-decisions checkpoint at the
 //! revision pinned in `bench/models.lock.json` in the HF cache, `source bench/env.sh` first).
-//! Starts the real `sys1d` binary on port 0 at that revision with every server setting
+//! Starts the real `sys1rust` binary on port 0 at that revision with every server setting
 //! pinned (the caller's environment cannot change them), posts every request in
 //! `bench/workloads/smoke.jsonl`, requires each response body to equal, byte for byte, an
 //! in-process `Agent::predict` of the same revision and engine settings serialized the way
@@ -10,7 +10,7 @@
 //! SIGINT. The child is killed if the test fails or hangs at any point.
 //!
 //! Run from the repository root with:
-//! `cargo test --manifest-path runtime/Cargo.toml -p sys1d --release --test live -- --ignored --nocapture`
+//! `cargo test --manifest-path runtime/Cargo.toml -p sys1rust --release --test live -- --ignored --nocapture`
 
 mod common;
 
@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use sys1d::config::{DEFAULT_MAX_CONCURRENT, DEFAULT_TUNING};
+use sys1rust::config::{DEFAULT_MAX_CONCURRENT, DEFAULT_TUNING};
 use tokio::net::TcpStream;
 
 /// Upstream's name for the served checkpoint, and its key in `bench/models.lock.json`.
@@ -241,7 +241,7 @@ mod compare_tests {
 /// definition so the list cannot fall behind `config.rs`.
 fn config_env_vars() -> Vec<String> {
     use clap::CommandFactory;
-    sys1d::Config::command()
+    sys1rust::Config::command()
         .get_arguments()
         .filter_map(|a| a.get_env().map(|e| e.to_string_lossy().into_owned()))
         .collect()
@@ -257,7 +257,7 @@ fn config_env_vars_are_known() {
     assert_eq!(vars.iter().collect::<BTreeSet<_>>().len(), vars.len());
 }
 
-/// The `sys1d` child. Dropping it kills the process if it is still running, so a failed
+/// The `sys1rust` child. Dropping it kills the process if it is still running, so a failed
 /// assertion or a timeout never leaves a server holding the model and GPU memory.
 struct Server(Child);
 
@@ -268,7 +268,7 @@ impl Server {
     /// with 401, and `SYS1_F32` or `SYS1_MLX_TUNING` would give the child an engine the
     /// in-process agent below does not have.
     fn spawn(revision: &str) -> Server {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sys1d"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_sys1rust"));
         for var in config_env_vars() {
             cmd.env_remove(var);
         }
@@ -290,7 +290,7 @@ impl Server {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .expect("spawn sys1d"),
+            .expect("spawn sys1rust"),
         )
     }
 
@@ -313,7 +313,7 @@ impl Server {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 panic!(
-                    "sys1d exited before printing a ready line: {:?}",
+                    "sys1rust exited before printing a ready line: {:?}",
                     self.0.wait()
                 )
             }
@@ -334,7 +334,7 @@ impl Server {
             }
             assert!(
                 Instant::now() < deadline,
-                "sys1d did not exit within {SHUTDOWN_TIMEOUT:?} of SIGINT"
+                "sys1rust did not exit within {SHUTDOWN_TIMEOUT:?} of SIGINT"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -344,7 +344,7 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if let Ok(None) = self.0.try_wait() {
-            eprintln!("killing sys1d (pid {}) that is still running", self.0.id());
+            eprintln!("killing sys1rust (pid {}) that is still running", self.0.id());
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
@@ -452,7 +452,7 @@ async fn smoke_workload_through_the_real_server() {
     // by the same serde_json call the inference thread uses, is the whole response body. A
     // parsed comparison would let whitespace or key order differ. Resolve the checkpoint the
     // way the binary did, so both sides read one snapshot.
-    let local_model = sys1d::config::resolve_served(MODEL, Some(&sha)).unwrap();
+    let local_model = sys1rust::config::resolve_served(MODEL, Some(&sha)).unwrap();
     assert_eq!(local_model.revision.as_deref(), Some(sha.as_str()));
     let routing = serde_json::json!({
         "model": local_model.name,

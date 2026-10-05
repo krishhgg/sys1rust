@@ -1,4 +1,4 @@
-//! `sys1d` entry point: set the MLX environment defaults the user has not set, resolve the
+//! `sys1rust` entry point: set the MLX environment defaults the user has not set, resolve the
 //! checkpoint, load and warm it on the inference thread, bind, print the one-line JSON ready
 //! event to stdout, serve until SIGINT/SIGTERM, then finish in-flight requests and exit 0.
 //! Everything human-readable goes to stderr.
@@ -9,14 +9,14 @@ use serde_json::json;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
-use sys1d::agent::AgentPredictor;
-use sys1d::config::{resolve_served, Config};
-use sys1d::{log, router, serve, AppState, Worker};
+use sys1rust::agent::AgentPredictor;
+use sys1rust::config::{resolve_served, Config};
+use sys1rust::{log, router, serve, AppState, Worker};
 
 fn main() -> ExitCode {
     // MLX reads its buffer limits once, when the inference thread's first GPU operation
     // creates the Metal device. Set the unset ones here, while this is the only thread and
-    // before any MLX call, so they act as if the user had set them before starting sys1d.
+    // before any MLX call, so they act as if the user had set them before starting sys1rust.
     let mlx_env = laya_mlx::set_mlx_env_defaults();
     match run(&mlx_env) {
         Ok(()) => ExitCode::SUCCESS,

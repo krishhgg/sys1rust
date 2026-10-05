@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 /// for the `repo` and `sha` of `<bench>/models.lock.json`. The hub cache is the directory
 /// huggingface_hub downloads into, resolved as it does ([`hf_cache_dir`]: `HF_HUB_CACHE`, else
 /// `HF_HOME/hub`, else `XDG_CACHE_HOME/huggingface/hub`, else `~/.cache/huggingface/hub`), the
-/// same lookup sys1d uses. Never downloads: a snapshot that is not there is an error naming the
+/// same lookup sys1rust uses. Never downloads: a snapshot that is not there is an error naming the
 /// directory and the cache it looked in.
 pub fn pinned_model_dir(bench: &Path, model: &str) -> Result<(PathBuf, String)> {
     pinned_model_dir_in(&hf_cache_dir(), bench, model)

@@ -31,7 +31,7 @@ struct Variant {
     notes: &'static str,
     opts: fn() -> BackendOptions,
     /// Set laya-mlx's MLX environment defaults (`MLX_ENV_DEFAULTS`) that the caller has not
-    /// set, as sys1d does.
+    /// set, as sys1rust does.
     mlx_env: bool,
 }
 
@@ -63,7 +63,7 @@ const VARIANTS: [Variant; 6] = [
     },
     Variant {
         name: "mlx-fp16-lean",
-        notes: "mlx-fp16-fast plus the results/SPEED.md work reductions, the sys1d default: dense local \
+        notes: "mlx-fp16-fast plus the results/SPEED.md work reductions, the sys1rust default: dense local \
                 attention up to 1,024 tokens, the last head layer only at the scorer's rows, no computing \
                 on padding, (round 2) the split + RoPE + unpad expand as one Metal kernel, and (round 3) \
                 local attention by chunks from 512 tokens, the projections on MLX's NAX gemm loop, the \
