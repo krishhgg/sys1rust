@@ -21,12 +21,11 @@
 
 ## Build
 
-There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.85 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python is only used to fetch MLX and the model. `sys1rust` doesn't run it.
+There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python only fetches MLX. `sys1rust` doesn't run it.
 
 ```sh
-# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files),
-# and the Hugging Face CLI (hf) to download models.
-python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2 huggingface_hub
+# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files).
+python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2
 export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os.path.dirname(mlx.core.__file__))')"
 
 # The binaries go to runtime/target/release/.
@@ -37,10 +36,9 @@ The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where 
 
 ## Try it
 
-Download the model once, at the revision sys1rust loads, then start the server:
+Start the server. The first start downloads the typed-decisions model (846 MB) into the Hugging Face cache:
 
 ```sh
-.mlx/bin/hf download convaiinnovations/laya-typed-decisions --revision 1a793eb568e6718f15941d08f85432581df534e3
 runtime/target/release/sys1rust serve --port 8000
 ```
 
@@ -90,7 +88,7 @@ Don't compare the two against the same threshold. `action.act_probability` comes
 - **The GPU runs one request at a time.** `sys1rust` holds up to 16 requests (`LAYA_MAX_CONCURRENT`), one running and the rest waiting their turn. A request that arrives while all 16 slots are held gets `503` with `Retry-After: 1` at once, so clients must retry it. More clients don't get more throughput, since one request already fills the GPU.
 - **All the questions in a request go through the model together**, one row per question, in fp16.
 - **It beats Python MLX by doing less work and tuning its matmuls, not by being Rust.** It skips computing on padding, runs the decision head's last layer only at the positions the answer reads, uses dense attention where that is cheaper, and from 512 tokens computes local attention only over the keys each window reaches. Its matmuls run MLX's own kernels for the M5's matrix units, with tile sizes tuned on this M5. The answers don't change.
-- **It reads models from the local Hugging Face cache.** `sys1rust` loads the revision pinned in `bench/models.lock.json` and never downloads.
+- **It downloads a model once, at a pinned revision.** The first `sys1rust serve` fetches the five files the model needs (846 MB for typed-decisions) into the Hugging Face cache and checks each one's hash. Later starts read them from there. `--offline` turns downloads off.
 
 ## Speed
 
@@ -106,7 +104,7 @@ Median time per request for the typed-decisions model on a base M5, in ms. These
 - **Against Python laya-mlx at its fastest**, it is 1.25x faster, and faster on all 12 benchmark sizes, by 13 to 55%.
 - **It gives the same answers.** On the 1,500-answer correctness workload, 1,498 agree with the upstream PyTorch fp32 reference (99.9%, above the 99% gate). The two that differ are near ties.
 - **Its tail stays close to the median.** In the timing runs, no request took more than twice the median for its size. Python MLX without a capped cache had 9% of requests over that line.
-- **It starts fast and is small.** From process start to the first answer takes 243 to 375 ms, with the model files already in the OS file cache. `sys1rust` is a 5 MB binary, and its HTTP layer adds 0.3 ms per request. macOS caches the compiled GPU kernels by the binary's path and the kernel source, so the first start from a new path or after a kernel change takes about 1.7 s longer.
+- **It starts fast and is small.** From process start to the first answer takes 243 to 375 ms, with the model files already in the OS file cache. `sys1rust` is a 7 MB binary, and its HTTP layer adds 0.3 ms per request. macOS caches the compiled GPU kernels by the binary's path and the kernel source, so the first start from a new path or after a kernel change takes about 1.7 s longer.
 
 Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on macOS 26.2 and wall power. Other chips are untested. The write-ups are in [`results/`](results/README.md). They run from the bake-off of 13 existing runtimes ([`REPORT.md`](results/REPORT.md)) to the speed round ([`SPEED.md`](results/SPEED.md)).
 
@@ -118,7 +116,7 @@ Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on mac
 | `multilingual` | `convaiinnovations/laya-multilingual` | mmBERT-base | 100% on correctness, smoke and short |
 | `english` | `convaiinnovations/laya` | ModernBERT-large | 100% on smoke, short and cold; no upstream correctness reference exists |
 
-`--model` also takes a local checkpoint directory. Before you serve a hub model, download it at the revision pinned in `bench/models.lock.json` with `hf download <repo> --revision <sha>`.
+The first `serve` of a model downloads it. `--model` also takes a local checkpoint directory, which `sys1rust` reads without downloading anything; the Hugging Face CLI's `hf download <repo>` fetches another hub checkpoint and prints its directory.
 
 ## More
 
@@ -137,6 +135,9 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 | `--max-concurrent` | `LAYA_MAX_CONCURRENT` | `16` | requests held at once; the next one gets `503` |
 | `--tuning` | `SYS1_MLX_TUNING` | the measured default | engine settings, see `Knobs` in `runtime/crates/laya-mlx` |
 | `--f32` | `SYS1_F32` | off | run the transformer in f32 instead of the checkpoint's f16 |
+| `--offline` | `HF_HUB_OFFLINE` | off | never download; a model that is not in the cache is an error. `HF_HUB_OFFLINE` turns it on when set to `1`, `ON`, `YES` or `TRUE`, in any letter case |
+
+`sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. Downloads honor `HF_ENDPOINT` and `HF_TOKEN`. `sys1rust` sends the token only to the endpoint, never after a redirect.
 
 `sys1rust` sets MLX's `MLX_MAX_MB_PER_BUFFER` to 10, measured faster on the M5, unless it is already set. At load it checks its M5 matmul kernels against MLX's, bit for bit, and prints the result on stderr. If the check fails, it uses MLX's matmuls and prints why.
 
@@ -166,7 +167,7 @@ runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.
 <summary><strong>Differences from <code>laya serve</code></strong></summary>
 
 - **Bind address.** `sys1rust` listens on 127.0.0.1 by default. `laya serve` listens on 0.0.0.0.
-- **Downloads.** `sys1rust` only reads the local Hugging Face cache, at the revision pinned in `bench/models.lock.json`. `laya serve` downloads a missing model.
+- **Downloads.** `sys1rust` downloads only the three Laya models, only at the revisions pinned in `bench/models.lock.json`, and only the five files each one needs. `laya serve` downloads any model repo at its newest revision.
 - **Duplicate choice keys.** When two of a choice's labels print as the same JSON key, such as `"1"` and `1`, upstream writes that key twice in `probabilities`, and `sys1rust` writes it once with the second label's probability. Python's `json`, JavaScript's `JSON.parse` and serde_json's `Value` keep the last duplicate, so a client parsing with one of them gets the same object from both servers. A parser that rejects duplicate keys or keeps the first one reads the two responses differently.
 - **JSON.** `sys1rust` accepts standard JSON in UTF-8. Upstream's `json.loads` also accepts `NaN`, `Infinity` and `-Infinity`, `\u` escapes of unpaired surrogates, and bodies in UTF-16 or UTF-32 or with a byte order mark. `sys1rust` answers those with 400 `request body must be valid JSON`.
 

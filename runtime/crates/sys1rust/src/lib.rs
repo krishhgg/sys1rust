@@ -5,17 +5,19 @@
 //! The binary in `main.rs` wires these pieces together; they are a library so the HTTP layer
 //! can be tested against a fake [`worker::Predictor`] without MLX or a checkpoint:
 //!
-//! - [`cli`]: the `serve` and `models` subcommands and the `--version` line.
+//! - [`cli`]: the `serve`, `pull` and `models` subcommands and the `--version` line.
 //! - [`config`]: CLI flags with env-var fallbacks, and resolving the served checkpoint.
 //! - [`worker`]: the single inference thread, its bounded job channel and reply oneshots.
 //! - [`validate`]: upstream's request checks (400/413/422 and the `model` field rule).
 //! - [`http`]: the axum router, admission, auth, body cap and error bodies.
 //! - [`agent`]: the real predictor over `laya_core::Agent`, with its warm-up requests.
 //! - [`models`]: the pinned manifest of the three Laya models and the `models` table.
+//! - [`download`]: model downloads into the Hugging Face cache, with resume and hash checks.
 
 pub mod agent;
 pub mod cli;
 pub mod config;
+pub mod download;
 pub mod http;
 pub mod models;
 pub mod validate;

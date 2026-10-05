@@ -59,7 +59,7 @@ def schedule(reqs, repeats, duration):
 
 def start_server(model, variant, log_path):
     """Spawn sys1rust serve on a free port and wait for its ready line. Returns (port, ready_ms, ready, proc, stop)."""
-    cmd = [TARGET + "/sys1rust", "serve", "--model", model, "--revision", LOCK[model]["sha"], "--port", "0"]
+    cmd = [TARGET + "/sys1rust", "serve", "--offline", "--model", model, "--revision", LOCK[model]["sha"], "--port", "0"]
     if variant["tuning"] is not None:
         cmd += ["--tuning", variant["tuning"]]
     log = open(log_path, "w")

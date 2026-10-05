@@ -1,18 +1,21 @@
 //! `sys1rust` entry point. `serve` sets the MLX environment defaults the user has not set,
 //! resolves the checkpoint, loads and warms it on the inference thread, binds, prints the
 //! one-line JSON ready event to stdout, serves until SIGINT/SIGTERM, then finishes in-flight
-//! requests and exits 0. `models` prints the Laya models table to stdout. Everything
-//! human-readable goes to stderr.
+//! requests and exits 0. `pull` downloads a model and prints its snapshot directory. With
+//! `HF_HUB_OFFLINE` on, it prints the directory only when the snapshot is complete. `models`
+//! prints the Laya models table to stdout. Everything human-readable goes to stderr.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
+use laya_core::resolve::hf_cache_dir;
 use serde_json::json;
 use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
 use sys1rust::agent::AgentPredictor;
-use sys1rust::cli::{Cli, Command};
-use sys1rust::config::{resolve_served, Config};
+use sys1rust::cli::{offline_from_env, Cli, Command, PullArgs};
+use sys1rust::config::{resolve_or_download, Config};
+use sys1rust::download::{Hub, Progress};
 use sys1rust::{log, models, router, serve, AppState, Worker};
 
 fn main() -> ExitCode {
@@ -26,6 +29,7 @@ fn main() -> ExitCode {
             let mlx_env = laya_mlx::set_mlx_env_defaults();
             serve_cmd(cfg, &mlx_env)
         }
+        Command::Pull(args) => pull_cmd(args),
         Command::Models => models_cmd(),
     };
     match result {
@@ -38,20 +42,53 @@ fn main() -> ExitCode {
 }
 
 fn models_cmd() -> Result<()> {
-    let table = models::table(&laya_core::resolve::hf_cache_dir());
+    print_out(&models::table(&hf_cache_dir()), "the models table")
+}
+
+/// Write `text` to stdout. `what` names it in the error.
+fn print_out(text: &str, what: &str) -> Result<()> {
     let mut out = std::io::stdout().lock();
-    match out.write_all(table.as_bytes()).and_then(|()| out.flush()) {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         // A reader that quits early, such as `head`, closes the pipe. That is not an error.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        r => r.context("writing the models table to stdout"),
+        r => r.with_context(|| format!("writing {what} to stdout")),
     }
+}
+
+fn pull_cmd(args: &PullArgs) -> Result<()> {
+    let model = models::find(&args.model).ok_or_else(|| {
+        anyhow!(
+            "unknown model {:?}; pull takes typed-decisions, multilingual, english or one of their repo ids",
+            args.model
+        )
+    })?;
+    let cache = hf_cache_dir();
+    // A complete snapshot needs no download, so HF_HUB_OFFLINE matters only when it is not.
+    let dir = if model.status(&cache) == models::Status::Complete {
+        model.snapshot_dir(&cache)
+    } else if offline_from_env() {
+        bail!(
+            "HF_HUB_OFFLINE is on, so nothing is downloaded; unset it to pull {}",
+            model.name
+        );
+    } else {
+        Hub::from_env().ensure(&cache, model, &mut Progress::stderr())?
+    };
+    print_out(&format!("{}\n", dir.display()), "the snapshot directory")
 }
 
 fn serve_cmd(cfg: &Config, mlx_env: &[(&str, &str)]) -> Result<()> {
     for (key, value) in mlx_env {
         log(format!("{key}={value} (default; set {key} to override)"));
     }
-    let served = resolve_served(&cfg.model, cfg.revision())?;
+    let hub = (!cfg.offline()).then(Hub::from_env);
+    let served = resolve_or_download(
+        &hf_cache_dir(),
+        &cfg.model,
+        cfg.revision(),
+        hub.as_ref(),
+        &mut Progress::stderr(),
+    )?;
     log(format!(
         "loading {} ({}{}) from {}",
         served.name,

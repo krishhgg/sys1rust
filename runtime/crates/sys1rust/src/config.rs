@@ -1,11 +1,13 @@
 //! Server configuration: CLI flags, each falling back to an environment variable, and the
 //! served checkpoint (a known name resolved in the local Hugging Face cache, or a directory).
 
+use crate::download::{Hub, Progress};
 use crate::models::{self, LayaModel, Status};
 use anyhow::{bail, Context, Result};
 use clap::Args;
 use laya_core::resolve::{hf_cache_dir, resolve_model_dir};
 use laya_core::BackendOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Upstream's default admission bound, also the fallback for an invalid `LAYA_MAX_CONCURRENT`.
@@ -45,8 +47,8 @@ pub const PUBLISHED_MODEL_IDS: [(&str, &str); 2] = [
 #[derive(Args, Debug, Clone)]
 pub struct Config {
     /// Checkpoint to serve: `typed-decisions`, `multilingual`, `english`, one of their repo
-    /// ids (`convaiinnovations/laya` is `english`), or a local checkpoint directory. Hub ids
-    /// are only looked up in the local HF cache.
+    /// ids (`convaiinnovations/laya` is `english`), or a local checkpoint directory. `serve`
+    /// downloads a missing Laya model at its pinned revision unless offline.
     #[arg(long, env = "SYS1_MODEL", default_value = "typed-decisions")]
     pub model: String,
     /// Load `snapshots/<sha>` of the cached repo instead of the revision pinned in
@@ -73,12 +75,21 @@ pub struct Config {
     /// Run the transformer in f32 instead of the checkpoint's f16.
     #[arg(long, env = "SYS1_F32")]
     pub f32: bool,
+    /// Never download. A Laya model that is not fully in the cache is then an error. Also on
+    /// when HF_HUB_OFFLINE is 1, ON, YES or TRUE, in any case.
+    #[arg(long)]
+    pub offline: bool,
 }
 
 impl Config {
     /// The api key, or `None` when unset or empty (upstream: `os.environ.get(...) or None`).
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref().filter(|k| !k.is_empty())
+    }
+
+    /// `--offline`, or `HF_HUB_OFFLINE` read as huggingface_hub reads it.
+    pub fn offline(&self) -> bool {
+        self.offline || crate::cli::offline_from_env()
     }
 
     pub fn revision(&self) -> Option<&str> {
@@ -220,13 +231,12 @@ impl std::fmt::Display for NotDownloaded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} ({} at revision {}) is not fully downloaded in {}; get it with `hf download {} --revision {}`",
+            "{} ({} at revision {}) is not fully downloaded in {}; run `sys1rust pull {}`",
             self.model.name,
             self.model.repo,
             self.model.revision,
             self.dir.display(),
-            self.model.repo,
-            self.model.revision
+            self.model.name
         )
     }
 }
@@ -317,6 +327,36 @@ pub fn resolve_served_in(cache: &Path, model: &str, revision: Option<&str>) -> R
     })
 }
 
+/// [`resolve_served_in`], first downloading a Laya model's pinned snapshot through `hub`
+/// when the cache does not have all of it. `hub` is `None` when offline.
+pub fn resolve_or_download<W: Write>(
+    cache: &Path,
+    model: &str,
+    revision: Option<&str>,
+    hub: Option<&Hub>,
+    progress: &mut Progress<W>,
+) -> Result<ServedModel> {
+    let err = match resolve_served_in(cache, model, revision) {
+        Ok(served) => return Ok(served),
+        Err(e) => e,
+    };
+    let Some(missing) = err.downcast_ref::<NotDownloaded>() else {
+        return Err(err);
+    };
+    let laya = missing.model;
+    let Some(hub) = hub else {
+        bail!("{err}; downloads are off (--offline or HF_HUB_OFFLINE)");
+    };
+    crate::log(format!(
+        "downloading {} ({} MB) into {}",
+        laya.name,
+        models::mb(laya.total_size()),
+        cache.display()
+    ));
+    hub.ensure(cache, laya, progress)?;
+    resolve_served_in(cache, model, revision)
+}
+
 fn pinned_dir(cache: &Path, laya: &'static LayaModel) -> Result<PathBuf> {
     let dir = laya.snapshot_dir(cache);
     if laya.status(cache) != Status::Complete {
@@ -344,6 +384,7 @@ fn snapshot_sha(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::download::Progress;
     use crate::models::{self, LayaModel};
     use std::fs;
 
@@ -528,6 +569,31 @@ mod tests {
             msg.contains(m.revision) && msg.contains("not fully downloaded"),
             "{msg}"
         );
+        assert!(msg.contains("sys1rust pull multilingual"), "{msg}");
+    }
+
+    #[test]
+    fn offline_names_pull_and_downloads_nothing() {
+        let cache = tempfile::tempdir().unwrap();
+        let mut progress = Progress::new(Vec::new(), false);
+        let e = resolve_or_download(cache.path(), "typed-decisions", None, None, &mut progress)
+            .unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("sys1rust pull typed-decisions"), "{msg}");
+        assert!(msg.contains("--offline"), "{msg}");
+        assert!(progress.into_inner().is_empty());
+        assert!(std::fs::read_dir(cache.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn a_complete_snapshot_needs_no_hub() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        fake_snapshot(cache.path(), m, m.revision);
+        let mut progress = Progress::new(Vec::new(), false);
+        let s = resolve_or_download(cache.path(), "typed-decisions", None, None, &mut progress)
+            .unwrap();
+        assert_eq!(s.revision.as_deref(), Some(m.revision));
     }
 
     /// `sys1rust models` shows the pin's first 7 characters, so `--revision` takes them too.
