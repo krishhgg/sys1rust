@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>sys1rust is a drop-in replacement for <code>laya serve</code> on Apple silicon, written in Rust with its own Metal kernels and no Python.</strong> Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability. Its server, <code>sys1d</code>, speaks the same <code>/v1/systemone</code> API, so Jev and Laya clients work with it unchanged.
+  <strong>sys1rust runs Laya's System 1 models on your Mac's GPU, in Rust with its own Metal kernels and no Python.</strong> Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability. Its server, <code>sys1d</code>, speaks the <code>/v1/systemone</code> API of <code>laya serve</code>, so Jev and Laya clients send it the same requests.
 </p>
 
 <p align="center">
