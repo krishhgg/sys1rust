@@ -19,3 +19,7 @@ bench/contenders/*/src/
 
 # Raw measurement data stays local; results/*.md summarize it
 results/raw/
+
+# Release bundle work dirs and output (packaging/build.sh)
+packaging/.work/
+dist/
