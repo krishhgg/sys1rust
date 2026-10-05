@@ -34,6 +34,12 @@ http-body-util = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 # Constant-time bearer token comparison.
 subtle = "2"
+# Model downloads: blocking HTTPS over rustls, trusting the macOS keychain's roots through
+# the platform verifier, so proxy roots a user installed work too.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+# Blob names: sha256 for LFS files, git blob sha1 for the rest.
+sha2 = "0.10"
+sha1 = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util"] }
