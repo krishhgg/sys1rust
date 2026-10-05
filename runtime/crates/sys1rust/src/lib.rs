@@ -5,7 +5,7 @@
 //! The binary in `main.rs` wires these pieces together; they are a library so the HTTP layer
 //! can be tested against a fake [`worker::Predictor`] without MLX or a checkpoint:
 //!
-//! - [`cli`]: the `serve` and `models` subcommands and the `--version` line.
+//! - [`cli`]: the `serve`, `pull` and `models` subcommands and the `--version` line.
 //! - [`config`]: CLI flags with env-var fallbacks, and resolving the served checkpoint.
 //! - [`worker`]: the single inference thread, its bounded job channel and reply oneshots.
 //! - [`validate`]: upstream's request checks (400/413/422 and the `model` field rule).

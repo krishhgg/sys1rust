@@ -272,6 +272,9 @@ impl Server {
     fn spawn(revision: &str) -> Server {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sys1rust"));
         cmd.arg("serve");
+        // The loop below removes HF_HUB_OFFLINE with the other settings, so this flag keeps
+        // the child offline.
+        cmd.arg("--offline");
         for var in config_env_vars() {
             cmd.env_remove(var);
         }

@@ -1,8 +1,8 @@
-//! The `sys1rust` command line. `serve` runs the HTTP server and `models` lists the Laya
-//! models and what the local Hugging Face cache holds of them.
+//! The `sys1rust` command line. `serve` runs the HTTP server, `pull` downloads a Laya model
+//! and `models` lists the Laya models and what the local Hugging Face cache holds of them.
 
 use crate::config::Config;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// `--version` text after the name: `0.1.0 (MLX 0.32.2, macos26 build)`. build.rs reads the
 /// MLX version from `MLX_VERSION` in vendor/mlx-sys/build.rs, which refuses any other MLX. The
@@ -33,8 +33,30 @@ pub struct Cli {
 pub enum Command {
     /// Run the HTTP server: POST /v1/systemone and GET /health.
     Serve(Config),
+    /// Download a Laya model at its pinned revision into the Hugging Face cache and print
+    /// the snapshot directory.
+    Pull(PullArgs),
     /// List the Laya models, their pinned revisions and what the cache holds.
     Models,
+}
+
+#[derive(Args, Debug)]
+pub struct PullArgs {
+    /// `typed-decisions`, `multilingual`, `english`, or one of their repo ids.
+    #[arg(default_value = "typed-decisions")]
+    pub model: String,
+}
+
+/// Whether `HF_HUB_OFFLINE` turns downloads off, read the way `serve --offline` reads it. Any
+/// value other than empty, 0, false, no, off, n or f (in any case) means offline. Like clap,
+/// it does not trim the value.
+pub fn offline_from_env() -> bool {
+    std::env::var("HF_HUB_OFFLINE").is_ok_and(|v| {
+        !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off" | "n" | "f"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -55,7 +77,7 @@ mod tests {
             ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
         );
         let help = e.to_string();
-        for sub in ["serve", "models"] {
+        for sub in ["serve", "pull", "models"] {
             assert!(help.contains(sub), "{help}");
         }
     }
@@ -94,6 +116,26 @@ mod tests {
             panic!("not serve")
         };
         assert_eq!((c.port, c.model.as_str()), (0, "english"));
+    }
+
+    #[test]
+    fn pull_defaults_to_typed_decisions() {
+        let Command::Pull(p) = parse(&["pull"]).unwrap().command else {
+            panic!("not pull")
+        };
+        assert_eq!(p.model, "typed-decisions");
+        let Command::Pull(p) = parse(&["pull", "english"]).unwrap().command else {
+            panic!("not pull")
+        };
+        assert_eq!(p.model, "english");
+    }
+
+    #[test]
+    fn serve_takes_offline() {
+        let Command::Serve(c) = parse(&["serve", "--offline"]).unwrap().command else {
+            panic!("not serve")
+        };
+        assert!(c.offline);
     }
 
     #[test]
