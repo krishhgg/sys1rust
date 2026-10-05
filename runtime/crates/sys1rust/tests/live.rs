@@ -241,7 +241,9 @@ mod compare_tests {
 /// definition so the list cannot fall behind `config.rs`.
 fn config_env_vars() -> Vec<String> {
     use clap::CommandFactory;
-    sys1rust::Config::command()
+    sys1rust::cli::Cli::command()
+        .find_subcommand("serve")
+        .expect("serve subcommand")
         .get_arguments()
         .filter_map(|a| a.get_env().map(|e| e.to_string_lossy().into_owned()))
         .collect()
@@ -269,6 +271,7 @@ impl Server {
     /// in-process agent below does not have.
     fn spawn(revision: &str) -> Server {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sys1rust"));
+        cmd.arg("serve");
         for var in config_env_vars() {
             cmd.env_remove(var);
         }

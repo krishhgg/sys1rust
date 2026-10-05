@@ -1,9 +1,11 @@
-//! `sys1rust`: a local HTTP server for the sys1rust runtime that speaks upstream Laya's
-//! `/v1/systemone` protocol (see `laya_serve.py` and `docs/http-api.md` upstream).
+//! This library holds the `sys1rust` command's argument parser, HTTP server, configuration
+//! and inference worker. The server speaks upstream Laya's `/v1/systemone` protocol (see
+//! `laya_serve.py` and `docs/http-api.md` upstream).
 //!
 //! The binary in `main.rs` wires these pieces together; they are a library so the HTTP layer
 //! can be tested against a fake [`worker::Predictor`] without MLX or a checkpoint:
 //!
+//! - [`cli`]: the `serve` and `models` subcommands and the `--version` line.
 //! - [`config`]: CLI flags with env-var fallbacks, and resolving the served checkpoint.
 //! - [`worker`]: the single inference thread, its bounded job channel and reply oneshots.
 //! - [`validate`]: upstream's request checks (400/413/422 and the `model` field rule).
@@ -11,6 +13,7 @@
 //! - [`agent`]: the real predictor over `laya_core::Agent`, with its warm-up requests.
 
 pub mod agent;
+pub mod cli;
 pub mod config;
 pub mod http;
 pub mod validate;

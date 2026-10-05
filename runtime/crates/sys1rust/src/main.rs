@@ -1,7 +1,8 @@
-//! `sys1rust` entry point: set the MLX environment defaults the user has not set, resolve the
-//! checkpoint, load and warm it on the inference thread, bind, print the one-line JSON ready
-//! event to stdout, serve until SIGINT/SIGTERM, then finish in-flight requests and exit 0.
-//! Everything human-readable goes to stderr.
+//! `sys1rust` entry point. `serve` sets the MLX environment defaults the user has not set,
+//! resolves the checkpoint, loads and warms it on the inference thread, binds, prints the
+//! one-line JSON ready event to stdout, serves until SIGINT/SIGTERM, then finishes in-flight
+//! requests and exits 0. `models` prints the Laya models table to stdout. Everything
+//! human-readable goes to stderr.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -10,15 +11,24 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::time::Duration;
 use sys1rust::agent::AgentPredictor;
+use sys1rust::cli::{Cli, Command};
 use sys1rust::config::{resolve_served, Config};
 use sys1rust::{log, router, serve, AppState, Worker};
 
 fn main() -> ExitCode {
-    // MLX reads its buffer limits once, when the inference thread's first GPU operation
-    // creates the Metal device. Set the unset ones here, while this is the only thread and
-    // before any MLX call, so they act as if the user had set them before starting sys1rust.
-    let mlx_env = laya_mlx::set_mlx_env_defaults();
-    match run(&mlx_env) {
+    let cli = Cli::parse();
+    let result = match &cli.command {
+        Command::Serve(cfg) => {
+            // MLX reads its buffer limits once, when the inference thread's first GPU
+            // operation creates the Metal device. Set the unset ones here, while this is the
+            // only thread and before any MLX call, so they act as if the user had set them
+            // before starting the server.
+            let mlx_env = laya_mlx::set_mlx_env_defaults();
+            serve_cmd(cfg, &mlx_env)
+        }
+        Command::Models => models_cmd(),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log(format!("error: {e:#}"));
@@ -27,8 +37,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(mlx_env: &[(&str, &str)]) -> Result<()> {
-    let cfg = Config::parse();
+fn models_cmd() -> Result<()> {
+    // Filled in by Task 3.
+    Ok(())
+}
+
+fn serve_cmd(cfg: &Config, mlx_env: &[(&str, &str)]) -> Result<()> {
     for (key, value) in mlx_env {
         log(format!("{key}={value} (default; set {key} to override)"));
     }

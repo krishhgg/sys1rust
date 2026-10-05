@@ -2,7 +2,7 @@
 //! served checkpoint (a known name resolved in the local Hugging Face cache, or a directory).
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::Args;
 use laya_core::resolve::{hf_cache_dir, resolve_model_dir};
 use laya_core::BackendOptions;
 use std::path::{Path, PathBuf};
@@ -41,11 +41,7 @@ pub const PUBLISHED_MODEL_IDS: [(&str, &str); 2] = [
     ("convaiinnovations/laya-typed-decisions", "typed-decisions"),
 ];
 
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "sys1rust",
-    about = "Local HTTP server for Laya System 1 decisions (POST /v1/systemone, GET /health)"
-)]
+#[derive(Args, Debug, Clone)]
 pub struct Config {
     /// Checkpoint to serve: `typed-decisions`, `multilingual`, `english`, one of their repo
     /// ids (`convaiinnovations/laya` is `english`), or a local checkpoint directory. Hub ids
@@ -311,6 +307,17 @@ fn snapshot_sha(dir: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn serve_args(args: &[&str]) -> std::result::Result<Config, clap::Error> {
+        use clap::Parser;
+        let all = ["sys1rust", "serve"]
+            .into_iter()
+            .chain(args.iter().copied());
+        match crate::cli::Cli::try_parse_from(all)?.command {
+            crate::cli::Command::Serve(c) => Ok(c),
+            other => panic!("not serve: {other:?}"),
+        }
+    }
+
     #[test]
     fn max_concurrent_falls_back_like_upstream() {
         assert_eq!(resolve_max_concurrent(None), 16);
@@ -422,7 +429,7 @@ mod tests {
 
     #[test]
     fn defaults_and_env_style_flags_parse() {
-        let c = Config::try_parse_from(["sys1rust"]).unwrap();
+        let c = serve_args(&[]).unwrap();
         assert_eq!(c.model, "typed-decisions");
         assert_eq!((c.host.as_str(), c.port), ("127.0.0.1", 8000));
         assert_eq!(c.max_concurrent(), 16);
@@ -432,8 +439,7 @@ mod tests {
         laya_mlx::check_settings(DEFAULT_TUNING).unwrap();
         assert!(c.backend_options().parallel_load().unwrap());
         assert!(!c.f32 && c.api_key().is_none() && c.revision().is_none());
-        let c = Config::try_parse_from([
-            "sys1rust",
+        let c = serve_args(&[
             "--port",
             "0",
             "--max-concurrent",
@@ -447,6 +453,6 @@ mod tests {
         assert_eq!(c.max_concurrent(), 16);
         assert!(c.api_key().is_none());
         assert!(c.backend_options().f32);
-        assert!(Config::try_parse_from(["sys1rust", "--port", "70000"]).is_err());
+        assert!(serve_args(&["--port", "70000"]).is_err());
     }
 }
