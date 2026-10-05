@@ -64,8 +64,15 @@ mod tests {
         assert_eq!(e.kind(), ErrorKind::DisplayVersion);
         let text = e.to_string();
         let want = format!("sys1rust {} (MLX 0.32.2, ", env!("CARGO_PKG_VERSION"));
-        assert!(text.starts_with(&want), "{text}");
-        assert!(text.trim_end().ends_with(" build)"), "{text}");
+        // build.rs names an unset or empty SYS1_BUILD_FLAVOR `source`.
+        let build = text
+            .trim_end()
+            .strip_prefix(&want)
+            .and_then(|rest| rest.strip_suffix(" build)"));
+        assert!(
+            matches!(build, Some("source" | "macos14" | "macos26")),
+            "{text}"
+        );
     }
 
     #[test]
