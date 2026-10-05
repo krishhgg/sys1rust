@@ -76,8 +76,8 @@ pub struct Config {
     #[arg(long, env = "SYS1_F32")]
     pub f32: bool,
     /// Never download. A Laya model that is not fully in the cache is then an error. Also on
-    /// when HF_HUB_OFFLINE is set to anything other than empty, 0, false, no, off, n or f.
-    #[arg(long, env = "HF_HUB_OFFLINE", value_parser = clap::builder::FalseyValueParser::new())]
+    /// when HF_HUB_OFFLINE is 1, ON, YES or TRUE, in any case.
+    #[arg(long)]
     pub offline: bool,
 }
 
@@ -85,6 +85,11 @@ impl Config {
     /// The api key, or `None` when unset or empty (upstream: `os.environ.get(...) or None`).
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref().filter(|k| !k.is_empty())
+    }
+
+    /// `--offline`, or `HF_HUB_OFFLINE` read as huggingface_hub reads it.
+    pub fn offline(&self) -> bool {
+        self.offline || crate::cli::offline_from_env()
     }
 
     pub fn revision(&self) -> Option<&str> {

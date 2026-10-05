@@ -41,12 +41,16 @@ fn main() -> ExitCode {
 }
 
 fn models_cmd() -> Result<()> {
-    let table = models::table(&hf_cache_dir());
+    print_out(&models::table(&hf_cache_dir()), "the models table")
+}
+
+/// Write `text` to stdout. `what` names it in the error.
+fn print_out(text: &str, what: &str) -> Result<()> {
     let mut out = std::io::stdout().lock();
-    match out.write_all(table.as_bytes()).and_then(|()| out.flush()) {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
         // A reader that quits early, such as `head`, closes the pipe. That is not an error.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        r => r.context("writing the models table to stdout"),
+        r => r.with_context(|| format!("writing {what} to stdout")),
     }
 }
 
@@ -59,20 +63,19 @@ fn pull_cmd(args: &PullArgs) -> Result<()> {
     })?;
     if offline_from_env() {
         bail!(
-            "HF_HUB_OFFLINE is set, so nothing is downloaded; unset it to pull {}",
+            "HF_HUB_OFFLINE is on, so nothing is downloaded; unset it to pull {}",
             model.name
         );
     }
     let dir = Hub::from_env().ensure(&hf_cache_dir(), model, &mut Progress::stderr())?;
-    println!("{}", dir.display());
-    Ok(())
+    print_out(&format!("{}\n", dir.display()), "the snapshot directory")
 }
 
 fn serve_cmd(cfg: &Config, mlx_env: &[(&str, &str)]) -> Result<()> {
     for (key, value) in mlx_env {
         log(format!("{key}={value} (default; set {key} to override)"));
     }
-    let hub = (!cfg.offline).then(Hub::from_env);
+    let hub = (!cfg.offline()).then(Hub::from_env);
     let served = resolve_or_download(
         &hf_cache_dir(),
         &cfg.model,

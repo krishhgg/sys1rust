@@ -47,16 +47,17 @@ pub struct PullArgs {
     pub model: String,
 }
 
-/// Whether `HF_HUB_OFFLINE` turns downloads off, read the way `serve --offline` reads it. Any
-/// value other than empty, 0, false, no, off, n or f (in any case) means offline. Like clap,
-/// it does not trim the value.
+/// Whether `HF_HUB_OFFLINE` turns downloads off for `pull` and `serve`. Unset means online.
 pub fn offline_from_env() -> bool {
-    std::env::var("HF_HUB_OFFLINE").is_ok_and(|v| {
-        !matches!(
-            v.to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off" | "n" | "f"
-        )
-    })
+    std::env::var("HF_HUB_OFFLINE").is_ok_and(|v| is_offline_value(&v))
+}
+
+/// huggingface_hub's reading of `HF_HUB_OFFLINE`, `value.upper() in {"1", "ON", "YES", "TRUE"}`.
+/// It ignores case and does not trim, so `2`, ` 1` and `off` all mean online.
+pub fn is_offline_value(value: &str) -> bool {
+    ["1", "ON", "YES", "TRUE"]
+        .iter()
+        .any(|t| value.eq_ignore_ascii_case(t))
 }
 
 #[cfg(test)]
@@ -136,6 +137,16 @@ mod tests {
             panic!("not serve")
         };
         assert!(c.offline);
+    }
+
+    #[test]
+    fn offline_values_match_huggingface_hub() {
+        for v in ["1", "ON", "on", "Yes", "TRUE", "true"] {
+            assert!(is_offline_value(v), "{v:?}");
+        }
+        for v in ["", "0", "2", " 1", "1 ", "off", "no", "false", "abc"] {
+            assert!(!is_offline_value(v), "{v:?}");
+        }
     }
 
     #[test]
