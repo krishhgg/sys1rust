@@ -1,4 +1,4 @@
-"""Bench adapter for the sys1d HTTP server (bench/PLAN.md, "Adapter interface").
+"""Bench adapter for the sys1rust HTTP server (bench/PLAN.md, "Adapter interface").
 
 Invoked through ./run for `http*` variants and for --list-variants (which merges in the in-process
 variants from sys1-bench). The client matches the bake-off's http contenders (laya-upstream,
@@ -26,7 +26,7 @@ MODELS = ["typed-decisions", "multilingual"]
 
 VARIANTS = [
     {"variant": "http-fp16-fast", "tuning": None,
-     "notes": "sys1d with its default engine settings. Since the speed round these are the mlx-fp16-lean "
+     "notes": "sys1rust serve with its default engine settings. Since the speed round these are the mlx-fp16-lean "
               "settings (f16gelu, 512 MiB MLX cache, 2 GiB wired, dense local attention up to 1,024 tokens, "
               "head pruning, unpadding, and since rounds 2 and 3 fuserope, band=512, nax=all, the loading "
               "settings and MLX_MAX_MB_PER_BUFFER=10); runs before that used the mlx-fp16-fast settings. The name is kept "
@@ -58,8 +58,8 @@ def schedule(reqs, repeats, duration):
 
 
 def start_server(model, variant, log_path):
-    """Spawn sys1d on a free port and wait for its ready line. Returns (port, ready_ms, ready, proc, stop)."""
-    cmd = [TARGET + "/sys1d", "--model", model, "--revision", LOCK[model]["sha"], "--port", "0"]
+    """Spawn sys1rust serve on a free port and wait for its ready line. Returns (port, ready_ms, ready, proc, stop)."""
+    cmd = [TARGET + "/sys1rust", "serve", "--model", model, "--revision", LOCK[model]["sha"], "--port", "0"]
     if variant["tuning"] is not None:
         cmd += ["--tuning", variant["tuning"]]
     log = open(log_path, "w")
@@ -83,7 +83,7 @@ def start_server(model, variant, log_path):
         signal.signal(sig, lambda *_: sys.exit(1))
     line = proc.stdout.readline()
     if not line:
-        raise RuntimeError("sys1d exited with %s before it was ready, see %s" % (proc.wait(), log_path))
+        raise RuntimeError("sys1rust serve exited with %s before it was ready, see %s" % (proc.wait(), log_path))
     ready = json.loads(line)
     port = int(ready["addr"].rsplit(":", 1)[1])
     return port, (time.perf_counter() - t0) * 1000, ready, proc, stop

@@ -21,7 +21,7 @@ use laya_core::{Agent, BackendOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// sys1d's round 2 default (`DEFAULT_TUNING`).
+/// sys1rust's round 2 default (`DEFAULT_TUNING`).
 const DEFAULT: &str = "f16gelu,cache=512,wired=2048,dense_upto=1024,headprune,unpad,fuserope";
 /// Each loading setting on top of [`DEFAULT`], none, and the three together.
 const LOADING: [&str; 5] = ["", "directload", "sharehead", "parallel_load", "directload,sharehead,parallel_load"];

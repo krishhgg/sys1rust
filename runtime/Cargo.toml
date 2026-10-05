@@ -4,7 +4,7 @@ members = [
     "crates/laya-core",
     "crates/laya-mlx",
     "crates/sys1-bench",
-    "crates/sys1d",
+    "crates/sys1rust",
 ]
 
 [workspace.package]

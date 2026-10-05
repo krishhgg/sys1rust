@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bench adapter entry point for the sys1rust runtime (bench/PLAN.md). exec keeps one PID.
 # In-process variants run in sys1-bench. `http*` variants and --list-variants go to
-# http_adapter.py, which drives the sys1d server and merges both variant lists.
+# http_adapter.py, which drives the sys1rust server and merges both variant lists.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../../env.sh"
 RT="$HERE/../../../runtime"

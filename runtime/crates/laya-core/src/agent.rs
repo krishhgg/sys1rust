@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// Rows (state and question pairs) per forward pass when `predict_batch` gets no batch size.
 /// 128 rows at `max_len` 512 keep the fp16 attention scores of a 12-head encoder under 1 GiB.
-/// sys1d never reaches this: it passes one state per request, bounded by its request limits.
+/// sys1rust never reaches this: it passes one state per request, bounded by its request limits.
 pub const DEFAULT_MAX_ROWS: usize = 128;
 
 /// States per forward pass for `n_questions` questions each, staying under [`DEFAULT_MAX_ROWS`].

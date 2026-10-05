@@ -9,11 +9,11 @@ use serde_json::{json, Map, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use sys1d::config::MAX_CONCURRENT_CAP;
-use sys1d::validate::{
+use sys1rust::config::MAX_CONCURRENT_CAP;
+use sys1rust::validate::{
     nesting_depth, validate_body, MAX_BODY_BYTES, MAX_JSON_DEPTH, MAX_STATE_CHARS,
 };
-use sys1d::worker::{Predictor, Worker};
+use sys1rust::worker::{Predictor, Worker};
 use tokio::io::AsyncWriteExt;
 
 /// Answers every question with choice `a`, except a score question, which gets laya-core's
@@ -564,7 +564,7 @@ async fn budget_overrides_are_422() {
         (r.status, r.detail()),
         (
             422,
-            "max_len overrides are not supported by sys1d".to_string()
+            "max_len overrides are not supported by sys1rust".to_string()
         )
     );
     let mut b = valid_body();
@@ -574,7 +574,7 @@ async fn budget_overrides_are_422() {
         (r.status, r.detail()),
         (
             422,
-            "head_max_len overrides are not supported by sys1d".to_string()
+            "head_max_len overrides are not supported by sys1rust".to_string()
         )
     );
     let mut b = valid_body();
@@ -835,7 +835,7 @@ async fn deep_request_to_a_dead_worker_is_503() {
     let req = validate_body(&deep_body(MAX_JSON_DEPTH - 1, &json!({})), SERVED_NAME).unwrap();
     assert!(matches!(
         handle.predict(req, json!({})).await,
-        Err(sys1d::worker::PredictError::Dead)
+        Err(sys1rust::worker::PredictError::Dead)
     ));
 }
 

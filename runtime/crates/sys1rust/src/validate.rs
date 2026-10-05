@@ -142,7 +142,7 @@ pub fn nesting_depth(raw: &[u8]) -> usize {
 /// from upstream. Upstream's `json.loads(raw)` also accepts the tokens `NaN`, `Infinity` and
 /// `-Infinity`, `\u` escapes of unpaired surrogates, and bodies in UTF-16 or UTF-32 or with a
 /// byte order mark. A `serde_json::Value` cannot hold a NaN or an unpaired surrogate, so
-/// matching those would take a different value type through laya-core. sys1d answers all of
+/// matching those would take a different value type through laya-core. sys1rust answers all of
 /// them with the 400 it gives malformed JSON, where upstream may serve them. Standard
 /// encoders do not write the three tokens: `JSON.stringify` writes `null` for NaN and the
 /// infinities, and `requests` and `httpx` refuse to send them. An unpaired surrogate is
@@ -171,7 +171,7 @@ fn needs_deep_stack(raw: &[u8]) -> Result<bool, Rejection> {
 /// Every value the checks build dies on that thread too.
 fn deep_thread() -> std::thread::Builder {
     std::thread::Builder::new()
-        .name("sys1d-deep-body".into())
+        .name("sys1rust-deep-body".into())
         .stack_size(DEEP_STACK)
 }
 
@@ -266,7 +266,7 @@ fn check_parsed(raw: &[u8], served_name: &str) -> Result<Validated, Rejection> {
         if matches!(obj.get(key), Some(v) if !v.is_null()) {
             return Err(Rejection::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
-                format!("{key} overrides are not supported by sys1d"),
+                format!("{key} overrides are not supported by sys1rust"),
             ));
         }
     }

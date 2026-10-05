@@ -93,7 +93,7 @@ fn resolve_noul_labels(labels: Option<&Value>) -> Result<(String, String)> {
 }
 
 /// `Agent._check_question`, rule for rule and byte for byte in its messages, so a client sees
-/// the same text from sys1d as from upstream's server. Every `%r` is Python's `repr`.
+/// the same text from sys1rust as from upstream's server. Every `%r` is Python's `repr`.
 fn check(qid: &str, qdef: &Value) -> Result<()> {
     let q = |msg: String| Error::Question(format!("question {}: {msg}", pyjson::repr_str(qid)));
     let Value::Object(o) = qdef else {

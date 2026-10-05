@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 404" width="880" height="404" role="img" aria-labelledby="t d">
-  <title id="t">How sys1d answers a request</title>
-  <desc id="d">Your app, a Jev or Laya client on the same Mac, sends POST /v1/systemone to sys1d, one process on 127.0.0.1:8000 with no Python. sys1d checks the API key if one is set and answers 401 to a missing or wrong key, takes one of 16 slots (the 17th request gets 503), checks the body's size, JSON and limits (else a 4xx error), encodes the state and one row per question with laya-core, runs the model on the GPU through MLX with laya-mlx, one request at a time, and decodes the probabilities into answers with laya-core. The answers go back to your app. The model weights come from the local Hugging Face cache and are read once at start.</desc>
+  <title id="t">How sys1rust answers a request</title>
+  <desc id="d">Your app, a Jev or Laya client on the same Mac, sends POST /v1/systemone to sys1rust, one process on 127.0.0.1:8000 with no Python. sys1rust checks the API key if one is set and answers 401 to a missing or wrong key, takes one of 16 slots (the 17th request gets 503), checks the body's size, JSON and limits (else a 4xx error), encodes the state and one row per question with laya-core, runs the model on the GPU through MLX with laya-mlx, one request at a time, and decodes the probabilities into answers with laya-core. The answers go back to your app. The model weights come from the local Hugging Face cache and are read once at start.</desc>
   <defs>
     <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" class="head"/></marker>
   </defs>
@@ -43,13 +43,13 @@
   <line class="line" x1="790" y1="200" x2="790" y2="80" marker-end="url(#ah)"/>
   <text class="s" x="780" y="118" text-anchor="end">answers, same JSON as laya serve</text>
 
-  <!-- sys1d process -->
+  <!-- sys1rust process -->
   <rect class="tbox" x="16" y="146" width="848" height="160" rx="10"/>
-  <text x="440" y="178" text-anchor="middle"><tspan class="h mono acc">sys1d</tspan><tspan class="s" dx="10">one process on 127.0.0.1:8000, no Python</tspan></text>
+  <text x="440" y="178" text-anchor="middle"><tspan class="h mono acc">sys1rust</tspan><tspan class="s" dx="10">one process on 127.0.0.1:8000, no Python</tspan></text>
 
   <!-- 1 -->
   <rect class="box" x="27" y="200" width="126" height="92" rx="8"/>
-  <text class="crate mono" x="90" y="220" text-anchor="middle">sys1d</text>
+  <text class="crate mono" x="90" y="220" text-anchor="middle">sys1rust</text>
   <text class="hb" x="90" y="243" text-anchor="middle">Check the key</text>
   <text class="s" x="90" y="262" text-anchor="middle">only if one is set,</text>
   <text class="s" x="90" y="279" text-anchor="middle">a bad key gets 401</text>
@@ -57,7 +57,7 @@
 
   <!-- 2 -->
   <rect class="box" x="167" y="200" width="126" height="92" rx="8"/>
-  <text class="crate mono" x="230" y="220" text-anchor="middle">sys1d</text>
+  <text class="crate mono" x="230" y="220" text-anchor="middle">sys1rust</text>
   <text class="hb" x="230" y="243" text-anchor="middle">Take a slot</text>
   <text class="s" x="230" y="262" text-anchor="middle">16 held at once,</text>
   <text class="s" x="230" y="279" text-anchor="middle">the 17th gets 503</text>
@@ -65,7 +65,7 @@
 
   <!-- 3 -->
   <rect class="box" x="307" y="200" width="126" height="92" rx="8"/>
-  <text class="crate mono" x="370" y="220" text-anchor="middle">sys1d</text>
+  <text class="crate mono" x="370" y="220" text-anchor="middle">sys1rust</text>
   <text class="hb" x="370" y="243" text-anchor="middle">Check the body</text>
   <text class="s" x="370" y="262" text-anchor="middle">size, JSON and</text>
   <text class="s" x="370" y="279" text-anchor="middle">limits, else 4xx</text>

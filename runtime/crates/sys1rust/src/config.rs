@@ -1,8 +1,9 @@
 //! Server configuration: CLI flags, each falling back to an environment variable, and the
 //! served checkpoint (a known name resolved in the local Hugging Face cache, or a directory).
 
+use crate::models::{self, LayaModel, Status};
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::Args;
 use laya_core::resolve::{hf_cache_dir, resolve_model_dir};
 use laya_core::BackendOptions;
 use std::path::{Path, PathBuf};
@@ -41,19 +42,17 @@ pub const PUBLISHED_MODEL_IDS: [(&str, &str); 2] = [
     ("convaiinnovations/laya-typed-decisions", "typed-decisions"),
 ];
 
-#[derive(Parser, Debug, Clone)]
-#[command(
-    name = "sys1d",
-    about = "Local HTTP server for Laya System 1 decisions (POST /v1/systemone, GET /health)"
-)]
+#[derive(Args, Debug, Clone)]
 pub struct Config {
     /// Checkpoint to serve: `typed-decisions`, `multilingual`, `english`, one of their repo
     /// ids (`convaiinnovations/laya` is `english`), or a local checkpoint directory. Hub ids
     /// are only looked up in the local HF cache.
     #[arg(long, env = "SYS1_MODEL", default_value = "typed-decisions")]
     pub model: String,
-    /// Use `snapshots/<sha>` of the cached repo instead of the newest snapshot. A single
-    /// directory name: letters, digits, `.`, `_` and `-`, not `.` or `..`.
+    /// Load `snapshots/<sha>` of the cached repo instead of the revision pinned in
+    /// bench/models.lock.json. sys1rust only ever downloads the pinned revision. A single
+    /// directory name: letters, digits, `.`, `_` and `-`, not `.` or `..`. The pin's first 7
+    /// or more characters also name the pin.
     #[arg(long, env = "SYS1_REVISION")]
     pub revision: Option<String>,
     /// Bind address. Upstream defaults to 0.0.0.0; this is a local runtime.
@@ -198,13 +197,6 @@ pub fn check_revision(rev: &str) -> Result<()> {
     Ok(())
 }
 
-fn repo_of(name: &str) -> Option<&'static str> {
-    CHECKPOINTS
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, repo)| *repo)
-}
-
 /// The one checkpoint this process serves.
 #[derive(Debug, Clone)]
 pub struct ServedModel {
@@ -217,32 +209,66 @@ pub struct ServedModel {
     pub dir: PathBuf,
 }
 
-/// Resolve `--model` / `--revision` to a checkpoint directory. Never downloads.
+/// A Laya model's pinned snapshot is not complete in the cache.
+#[derive(Debug)]
+pub struct NotDownloaded {
+    pub model: &'static LayaModel,
+    pub dir: PathBuf,
+}
+
+impl std::fmt::Display for NotDownloaded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} ({} at revision {}) is not fully downloaded in {}; get it with `hf download {} --revision {}`",
+            self.model.name,
+            self.model.repo,
+            self.model.revision,
+            self.dir.display(),
+            self.model.repo,
+            self.model.revision
+        )
+    }
+}
+
+impl std::error::Error for NotDownloaded {}
+
+/// Resolve `--model` / `--revision` in the local HF cache. Never downloads.
 pub fn resolve_served(model: &str, revision: Option<&str>) -> Result<ServedModel> {
+    resolve_served_in(&hf_cache_dir(), model, revision)
+}
+
+/// [`resolve_served`] in `cache`. A Laya model without `--revision`, or with its pinned one or
+/// 7 or more leading characters of it, loads the pinned snapshot, and the error is a
+/// [`NotDownloaded`] when the cache does not have all of it. Any other revision must already
+/// be in the cache.
+pub fn resolve_served_in(cache: &Path, model: &str, revision: Option<&str>) -> Result<ServedModel> {
     let model = model.trim();
-    if let Some(name) = cli_checkpoint_name(model) {
-        let repo = repo_of(name).expect("every known name has a repo");
+    if let Some(laya) = models::find(model) {
         let dir = match revision {
             Some(rev) => {
                 check_revision(rev)?;
-                let snap = hf_cache_dir()
-                    .join(format!("models--{}", repo.replace('/', "--")))
-                    .join("snapshots")
-                    .join(rev);
-                if !snap.is_dir() {
-                    bail!(
-                        "revision {rev} of {repo} is not in the local HF cache ({})",
-                        snap.display()
-                    );
+                // `sys1rust models` prints the pin's first 7 characters.
+                if rev.len() >= 7 && laya.revision.starts_with(rev) {
+                    pinned_dir(cache, laya)?
+                } else {
+                    let snap = laya.repo_dir(cache).join("snapshots").join(rev);
+                    if !snap.is_dir() {
+                        bail!(
+                            "revision {rev} of {} is not in the local HF cache ({})",
+                            laya.repo,
+                            snap.display()
+                        );
+                    }
+                    resolve_model_dir(&snap.to_string_lossy(), None)?
                 }
-                resolve_model_dir(&snap.to_string_lossy(), None)?
             }
-            None => resolve_model_dir(repo, None)?,
+            None => pinned_dir(cache, laya)?,
         };
         let revision = snapshot_sha(&dir);
         return Ok(ServedModel {
-            name: name.into(),
-            repo: repo.into(),
+            name: laya.name.into(),
+            repo: laya.repo.into(),
             revision,
             dir,
         });
@@ -291,6 +317,14 @@ pub fn resolve_served(model: &str, revision: Option<&str>) -> Result<ServedModel
     })
 }
 
+fn pinned_dir(cache: &Path, laya: &'static LayaModel) -> Result<PathBuf> {
+    let dir = laya.snapshot_dir(cache);
+    if laya.status(cache) != Status::Complete {
+        return Err(NotDownloaded { model: laya, dir }.into());
+    }
+    Ok(resolve_model_dir(&dir.to_string_lossy(), None)?)
+}
+
 /// `.../models--org--name/snapshots/<sha>` -> (`org/name`, sha).
 fn hub_layout(dir: &Path) -> Option<(String, String)> {
     let sha = dir.file_name()?.to_str()?;
@@ -310,6 +344,19 @@ fn snapshot_sha(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{self, LayaModel};
+    use std::fs;
+
+    fn serve_args(args: &[&str]) -> std::result::Result<Config, clap::Error> {
+        use clap::Parser;
+        let all = ["sys1rust", "serve"]
+            .into_iter()
+            .chain(args.iter().copied());
+        match crate::cli::Cli::try_parse_from(all)?.command {
+            crate::cli::Command::Serve(c) => Ok(c),
+            other => panic!("not serve: {other:?}"),
+        }
+    }
 
     #[test]
     fn max_concurrent_falls_back_like_upstream() {
@@ -406,6 +453,118 @@ mod tests {
         assert!(e.to_string().starts_with("invalid revision"), "{e}");
     }
 
+    /// Every manifest file at its size, as sparse files, so an 842 MB weights file costs
+    /// nothing.
+    fn fake_snapshot(cache: &Path, m: &LayaModel, rev: &str) -> PathBuf {
+        let snap = m.repo_dir(cache).join("snapshots").join(rev);
+        for f in m.files {
+            let p = snap.join(f.path);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::File::create(&p).unwrap().set_len(f.size).unwrap();
+        }
+        snap
+    }
+
+    #[test]
+    fn a_laya_model_loads_its_pinned_revision() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        let snap = fake_snapshot(cache.path(), m, m.revision);
+        for (model, rev) in [
+            ("typed-decisions", None),
+            ("convaiinnovations/laya-typed-decisions", Some(m.revision)),
+        ] {
+            let s = resolve_served_in(cache.path(), model, rev).unwrap();
+            assert_eq!(s.dir, snap);
+            assert_eq!(s.revision.as_deref(), Some(m.revision));
+            assert_eq!((s.name.as_str(), s.repo.as_str()), (m.name, m.repo));
+        }
+    }
+
+    #[test]
+    fn refs_main_no_longer_picks_the_snapshot() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("english").unwrap();
+        let other = "0000000000000000000000000000000000000000";
+        fake_snapshot(cache.path(), m, other);
+        let refs = m.repo_dir(cache.path()).join("refs");
+        fs::create_dir_all(&refs).unwrap();
+        fs::write(refs.join("main"), other).unwrap();
+        let e = resolve_served_in(cache.path(), "english", None).unwrap_err();
+        let missing = e.downcast_ref::<NotDownloaded>().expect("NotDownloaded");
+        assert_eq!(missing.model.name, "english");
+        assert_eq!(missing.dir, m.snapshot_dir(cache.path()));
+        // Naming the other snapshot still loads it.
+        let s = resolve_served_in(cache.path(), "english", Some(other)).unwrap();
+        assert_eq!(s.revision.as_deref(), Some(other));
+    }
+
+    /// With both snapshots complete, the pin wins over the one `refs/main` names.
+    #[test]
+    fn the_pin_beats_refs_main_when_both_are_cached() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("english").unwrap();
+        let other = "0000000000000000000000000000000000000000";
+        let pinned = fake_snapshot(cache.path(), m, m.revision);
+        fake_snapshot(cache.path(), m, other);
+        let refs = m.repo_dir(cache.path()).join("refs");
+        fs::create_dir_all(&refs).unwrap();
+        fs::write(refs.join("main"), other).unwrap();
+        let s = resolve_served_in(cache.path(), "english", None).unwrap();
+        assert_eq!(s.dir, pinned);
+        assert_eq!(s.revision.as_deref(), Some(m.revision));
+    }
+
+    #[test]
+    fn a_partial_pinned_snapshot_is_not_downloaded() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("multilingual").unwrap();
+        let snap = fake_snapshot(cache.path(), m, m.revision);
+        fs::remove_file(snap.join("tokenizer/tokenizer.json")).unwrap();
+        let e = resolve_served_in(cache.path(), "multilingual", None).unwrap_err();
+        assert!(e.downcast_ref::<NotDownloaded>().is_some(), "{e:#}");
+        let msg = e.to_string();
+        assert!(
+            msg.contains(m.revision) && msg.contains("not fully downloaded"),
+            "{msg}"
+        );
+    }
+
+    /// `sys1rust models` shows the pin's first 7 characters, so `--revision` takes them too.
+    #[test]
+    fn a_7_character_prefix_names_the_pin() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        let short = &m.revision[..7];
+        let e = resolve_served_in(cache.path(), "typed-decisions", Some(short)).unwrap_err();
+        assert!(e.downcast_ref::<NotDownloaded>().is_some(), "{e:#}");
+        let snap = fake_snapshot(cache.path(), m, m.revision);
+        let s = resolve_served_in(cache.path(), "typed-decisions", Some(short)).unwrap();
+        assert_eq!(s.dir, snap);
+        assert_eq!(s.revision.as_deref(), Some(m.revision));
+    }
+
+    #[test]
+    fn a_shorter_or_unrelated_revision_is_not_the_pin() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("typed-decisions").unwrap();
+        fake_snapshot(cache.path(), m, m.revision);
+        let unrelated = if m.revision.starts_with('0') { "1111111" } else { "0000000" };
+        for rev in [&m.revision[..6], unrelated] {
+            let e = resolve_served_in(cache.path(), "typed-decisions", Some(rev)).unwrap_err();
+            assert!(e.downcast_ref::<NotDownloaded>().is_none(), "{rev}: {e:#}");
+            assert!(e.to_string().contains("not in the local HF cache"), "{rev}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_unpinned_revision_must_be_cached() {
+        let cache = tempfile::tempdir().unwrap();
+        let e = resolve_served_in(cache.path(), "typed-decisions", Some("abc123")).unwrap_err();
+        assert!(e.downcast_ref::<NotDownloaded>().is_none());
+        assert!(e.to_string().contains("not in the local HF cache"), "{e}");
+    }
+
     #[test]
     fn hub_layout_is_detected() {
         let p =
@@ -422,7 +581,7 @@ mod tests {
 
     #[test]
     fn defaults_and_env_style_flags_parse() {
-        let c = Config::try_parse_from(["sys1d"]).unwrap();
+        let c = serve_args(&[]).unwrap();
         assert_eq!(c.model, "typed-decisions");
         assert_eq!((c.host.as_str(), c.port), ("127.0.0.1", 8000));
         assert_eq!(c.max_concurrent(), 16);
@@ -432,8 +591,7 @@ mod tests {
         laya_mlx::check_settings(DEFAULT_TUNING).unwrap();
         assert!(c.backend_options().parallel_load().unwrap());
         assert!(!c.f32 && c.api_key().is_none() && c.revision().is_none());
-        let c = Config::try_parse_from([
-            "sys1d",
+        let c = serve_args(&[
             "--port",
             "0",
             "--max-concurrent",
@@ -447,6 +605,6 @@ mod tests {
         assert_eq!(c.max_concurrent(), 16);
         assert!(c.api_key().is_none());
         assert!(c.backend_options().f32);
-        assert!(Config::try_parse_from(["sys1d", "--port", "70000"]).is_err());
+        assert!(serve_args(&["--port", "70000"]).is_err());
     }
 }

@@ -1,16 +1,18 @@
 [package]
-name = "sys1d"
+name = "sys1rust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Local HTTP server for the sys1rust runtime, speaking Laya's /v1/systemone protocol."
+description = "Runs Laya System 1 models on Apple silicon GPUs and serves Laya's /v1/systemone protocol."
 
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "sys1d"
+name = "sys1rust"
 path = "src/main.rs"
+# The library has the same name; documenting both would collide.
+doc = false
 
 [dependencies]
 laya-core = { workspace = true }
@@ -35,3 +37,5 @@ subtle = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util"] }
+# Temporary Hugging Face caches in tests. Already in Cargo.lock through other crates.
+tempfile = "3"

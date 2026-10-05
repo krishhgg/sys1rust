@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 292" width="880" height="292" role="img" aria-labelledby="t d">
-  <title id="t">A request to sys1d and its answer</title>
-  <desc id="d">Left: an app sends sys1d a support message and three questions: which team should handle it (a choice of billing, tech or sales), how urgent it is (a score from none to now), and whether money is involved (a yes or no). Right: sys1d answers billing with probability 0.79, urgency 2.54 on the 0 to 3 scale, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python.</desc>
+  <title id="t">A request to sys1rust and its answer</title>
+  <desc id="d">Left: an app sends sys1rust a support message and three questions: which team should handle it (a choice of billing, tech or sales), how urgent it is (a score from none to now), and whether money is involved (a yes or no). Right: sys1rust answers billing with probability 0.79, urgency 2.54 on the 0 to 3 scale, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python.</desc>
   <style>
     .win { fill: #161B22; stroke: #30363D; stroke-width: 1.5; }
     .bar { stroke: #30363D; stroke-width: 1; }
@@ -32,7 +32,7 @@
   <rect class="win" x="453" y="1" width="426" height="290" rx="10"/>
   <line class="bar" x1="453" y1="34" x2="879" y2="34"/>
   <circle cx="472" cy="17.5" r="5.5" fill="#FF5F57"/><circle cx="490" cy="17.5" r="5.5" fill="#FEBC2E"/><circle cx="508" cy="17.5" r="5.5" fill="#28C840"/>
-  <text class="ttl" x="666" y="22" text-anchor="middle">sys1d answers</text>
+  <text class="ttl" x="666" y="22" text-anchor="middle">sys1rust answers</text>
   <text class="m" x="472" y="64" xml:space="preserve">{"answers": {</text>
   <text class="m" x="472" y="86" xml:space="preserve">  "team": {"choice": <tspan class="pr">"billing"</tspan>,</text>
   <text class="m" x="472" y="108" xml:space="preserve">    "answer_confidence": <tspan class="pr">0.7941</tspan>},</text>

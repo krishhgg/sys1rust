@@ -16,7 +16,7 @@
 //! (round 3) runs the local layers' attention by chunks in a layout that kernel writes.
 //! Loading settings (round 3): `directload` (f16 tensors copied into MLX from the checkpoint
 //! as they are) and `sharehead` (the pruned head layer's projections as views of the full one).
-//! [`MLX_ENV_DEFAULTS`] lists the MLX environment variables sys1d sets for itself.
+//! [`MLX_ENV_DEFAULTS`] lists the MLX environment variables sys1rust sets for itself.
 //! Experiments that gained nothing (`split`, `rope1`, `splitk`) were removed after commit
 //! 0495800; that commit has their code.
 
@@ -84,7 +84,7 @@ struct Knobs {
     /// Keep GELU in the compute dtype (fixes the upstream f16 -> f32 promotion). Off by
     /// default like every knob here, so that `BackendOptions::default()` reproduces upstream's
     /// numerics and the bench's `mlx-fp16` control variant measures the promotion. Everything
-    /// that serves answers (`sys1d`, the other bench variants) sets `f16gelu`.
+    /// that serves answers (`sys1rust`, the other bench variants) sets `f16gelu`.
     f16gelu: bool,
     /// Pad the sequence length up to the first of these that fits (`buckets=128:256:512`).
     buckets: Vec<usize>,
@@ -265,7 +265,7 @@ pub fn check_settings(spec: &str) -> Result<()> {
     Knobs::parse(spec).map(|_| ())
 }
 
-/// MLX environment variables that sys1d (and sys1-bench's `mlx-fp16-lean` variant) set for
+/// MLX environment variables that sys1rust (and sys1-bench's `mlx-fp16-lean` variant) set for
 /// themselves when the user has not set them. These are process-wide MLX limits, not backend
 /// settings, so they live outside `Knobs`.
 ///
@@ -373,7 +373,7 @@ type CompiledFn = Box<dyn for<'a> FnMut(&'a [Array]) -> std::result::Result<Vec<
 /// The default is the shapeless trace: GELU * gate is elementwise, so one trace serves every
 /// input shape and the split (which needs concrete shapes) happens outside as two views. This
 /// matters with `unpad`, where the input shape is the request's total token count. Paired A/B
-/// on the timing workload against the per-shape trace, sys1d's settings: 1.001 typed-decisions,
+/// on the timing workload against the per-shape trace, sys1rust's settings: 1.001 typed-decisions,
 /// 1.013 and 1.004 (sides swapped) multilingual, identical answers. The per-shape mode
 /// (`geglu=compiled`) stays for experiments; MLX keeps one trace per distinct input shape for
 /// the life of the process, so the mode compiles at most [`GEGLU_MAX_SHAPES`] shapes and hands

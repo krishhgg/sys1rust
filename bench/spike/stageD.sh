@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage D: the sys1d server over HTTP against the in-process engine, on AC power.
+# Stage D: the sys1rust server over HTTP against the in-process engine, on AC power.
 # Also reruns the in-process engine and the cache-capped Python control on AC (the bar was set on AC).
 cd "$(dirname "${BASH_SOURCE[0]}")"
 # The recorded run used STAMP=20260929T123000. By default a new run gets a fresh stamp, so it

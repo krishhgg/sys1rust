@@ -1464,7 +1464,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sys1d"
+name = "sys1rust"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1476,6 +1476,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
+ "tempfile",
  "tokio",
 ]
 
