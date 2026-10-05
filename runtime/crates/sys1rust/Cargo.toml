@@ -37,3 +37,5 @@ subtle = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util"] }
+# Temporary Hugging Face caches in tests. Already in Cargo.lock through other crates.
+tempfile = "3"

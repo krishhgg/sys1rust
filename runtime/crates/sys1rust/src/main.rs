@@ -13,7 +13,7 @@ use std::time::Duration;
 use sys1rust::agent::AgentPredictor;
 use sys1rust::cli::{Cli, Command};
 use sys1rust::config::{resolve_served, Config};
-use sys1rust::{log, router, serve, AppState, Worker};
+use sys1rust::{log, models, router, serve, AppState, Worker};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -38,7 +38,7 @@ fn main() -> ExitCode {
 }
 
 fn models_cmd() -> Result<()> {
-    // Filled in by Task 3.
+    print!("{}", models::table(&laya_core::resolve::hf_cache_dir()));
     Ok(())
 }
 
