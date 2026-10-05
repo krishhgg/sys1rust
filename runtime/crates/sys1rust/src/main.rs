@@ -38,8 +38,13 @@ fn main() -> ExitCode {
 }
 
 fn models_cmd() -> Result<()> {
-    print!("{}", models::table(&laya_core::resolve::hf_cache_dir()));
-    Ok(())
+    let table = models::table(&laya_core::resolve::hf_cache_dir());
+    let mut out = std::io::stdout().lock();
+    match out.write_all(table.as_bytes()).and_then(|()| out.flush()) {
+        // A reader that quits early, such as `head`, closes the pipe. That is not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        r => r.context("writing the models table to stdout"),
+    }
 }
 
 fn serve_cmd(cfg: &Config, mlx_env: &[(&str, &str)]) -> Result<()> {

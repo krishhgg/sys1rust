@@ -118,7 +118,7 @@ Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on mac
 | `multilingual` | `convaiinnovations/laya-multilingual` | mmBERT-base | 100% on correctness, smoke and short |
 | `english` | `convaiinnovations/laya` | ModernBERT-large | 100% on smoke, short and cold; no upstream correctness reference exists |
 
-`--model` also takes a local checkpoint directory. Download a hub model with `hf download <repo>` before you serve it.
+`--model` also takes a local checkpoint directory. Before you serve a hub model, download it at the revision pinned in `bench/models.lock.json` with `hf download <repo> --revision <sha>`.
 
 ## More
 

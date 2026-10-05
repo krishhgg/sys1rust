@@ -50,7 +50,7 @@ pub struct Config {
     #[arg(long, env = "SYS1_MODEL", default_value = "typed-decisions")]
     pub model: String,
     /// Load `snapshots/<sha>` of the cached repo instead of the revision pinned in
-    /// bench/models.lock.json. Only the pinned revision is ever downloaded. A single
+    /// bench/models.lock.json. sys1rust only ever downloads the pinned revision. A single
     /// directory name: letters, digits, `.`, `_` and `-`, not `.` or `..`.
     #[arg(long, env = "SYS1_REVISION")]
     pub revision: Option<String>,
@@ -494,6 +494,22 @@ mod tests {
         // Naming the other snapshot still loads it.
         let s = resolve_served_in(cache.path(), "english", Some(other)).unwrap();
         assert_eq!(s.revision.as_deref(), Some(other));
+    }
+
+    /// With both snapshots complete, the pin wins over the one `refs/main` names.
+    #[test]
+    fn the_pin_beats_refs_main_when_both_are_cached() {
+        let cache = tempfile::tempdir().unwrap();
+        let m = models::find("english").unwrap();
+        let other = "0000000000000000000000000000000000000000";
+        let pinned = fake_snapshot(cache.path(), m, m.revision);
+        fake_snapshot(cache.path(), m, other);
+        let refs = m.repo_dir(cache.path()).join("refs");
+        fs::create_dir_all(&refs).unwrap();
+        fs::write(refs.join("main"), other).unwrap();
+        let s = resolve_served_in(cache.path(), "english", None).unwrap();
+        assert_eq!(s.dir, pinned);
+        assert_eq!(s.revision.as_deref(), Some(m.revision));
     }
 
     #[test]

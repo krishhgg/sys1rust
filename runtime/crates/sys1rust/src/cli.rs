@@ -98,6 +98,6 @@ mod tests {
     #[test]
     fn the_old_server_flags_need_serve() {
         assert!(parse(&["--port", "8000"]).is_err());
-        assert!(parse(&["sys1d"]).is_err());
+        assert!(parse(&["--model", "english"]).is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! The three Laya models sys1rust can download, each at the revision pinned in
-//! `bench/models.lock.json`, with the five files the loader reads. A file's `blob` is the name
-//! huggingface_hub gives it under `blobs/`: its sha256 for a Git LFS file, its git blob sha1
-//! otherwise. `packaging/gen_manifest.py` prints the table from the pinned snapshots and checks
+//! `bench/models.lock.json`, with the five files the loader reads. huggingface_hub names a file
+//! under `blobs/` by its sha256 for a Git LFS file and by its git blob sha1 otherwise. A file's
+//! `blob` is that name. `packaging/gen_manifest.py` prints the table from the pinned snapshots and checks
 //! every blob name against the file's bytes.
 
 use std::path::{Path, PathBuf};

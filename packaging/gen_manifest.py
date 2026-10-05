@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the MODELS table of runtime/crates/sys1rust/src/models.rs from a Hugging Face cache
-that holds the snapshots pinned in bench/models.lock.json. Every blob name is checked against
-the file's bytes: sha256 for an LFS file, git blob sha1 otherwise.
+that holds the snapshots pinned in bench/models.lock.json. The script checks every blob name
+against the file's bytes. It uses sha256 for an LFS file and the git blob sha1 otherwise.
 
 Usage: packaging/gen_manifest.py [HF_HUB_CACHE]
 """
@@ -26,10 +26,14 @@ def matches(path, blob):
 
 
 def default_cache():
-    if os.environ.get("HF_HUB_CACHE"):
-        return os.environ["HF_HUB_CACHE"]
-    home = os.environ.get("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
-    return os.path.join(home, "hub")
+    # Same order as hf_cache_dir() in laya-core's resolve.rs. Empty variables count as unset.
+    env = lambda k: os.environ.get(k) or None
+    if env("HF_HUB_CACHE"):
+        return env("HF_HUB_CACHE")
+    if env("HF_HOME"):
+        return os.path.join(env("HF_HOME"), "hub")
+    cache = env("XDG_CACHE_HOME") or os.path.join(env("HOME") or ".", ".cache")
+    return os.path.join(cache, "huggingface", "hub")
 
 
 def main():
