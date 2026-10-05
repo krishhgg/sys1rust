@@ -1,11 +1,9 @@
-<h1 align="center">sys1rust</h1>
-
 <p align="center">
-  <strong>Laya's System 1 decisions on your Mac's GPU. No Python. Same API as <code>laya serve</code>.</strong>
+  <img src="docs/assets/speed.svg" alt="Laya's System 1 decisions in 15.5 ms on an M5 Mac, up to 4.1x faster than laya serve. Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. Ten questions over 512 tokens: 379, 430 and 708 ms." width="880">
 </p>
 
 <p align="center">
-  sys1rust runs Laya's decision models locally on Apple silicon. Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability, in about 13 ms of inference on a base M5. Its server, <code>sys1d</code>, speaks the same <code>/v1/systemone</code> API as upstream <code>laya serve</code>, so Jev and Laya clients can point at it without changes.
+  <strong>sys1rust runs Laya's System 1 models on your Mac's GPU, in Rust with its own Metal kernels and no Python.</strong> Send it some text and a few questions, and it answers each one with a choice, a score or a yes probability. Its server, <code>sys1d</code>, speaks the <code>/v1/systemone</code> API of <code>laya serve</code>, so Jev and Laya clients send it the same requests.
 </p>
 
 <p align="center">
@@ -19,10 +17,6 @@
   <img alt="macOS on Apple silicon" src="https://img.shields.io/badge/macOS-Apple_silicon-2D2A26?style=flat-square">
   <img alt="MLX 0.32.2" src="https://img.shields.io/badge/MLX-0.32.2-2D2A26?style=flat-square">
   <img alt="No Python at run time" src="https://img.shields.io/badge/Python_at_run_time-none-BF6A2B?style=flat-square">
-</p>
-
-<p align="center">
-  <img src="docs/assets/request-answer.svg" alt="An app sends sys1d a support message and three questions: which team should handle it, how urgent it is, and whether money is involved. sys1d answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
 </p>
 
 ## Build
@@ -65,6 +59,10 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 }'
 ```
 
+<p align="center">
+  <img src="docs/assets/request-answer.svg" alt="An app sends sys1d a support message and three questions: which team should handle it, how urgent it is, and whether money is involved. sys1d answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
+</p>
+
 On the base M5, inference for this request took 13.0 to 13.3 ms over 18 runs, 6 in each of 3 fresh processes after 2 warm-up requests. That is the `X-Inference-Time-Ms` header, which `curl -si` shows. It covers tokenizing, running the model and decoding. It leaves out reading and checking the request, waiting for the GPU and writing the reply.
 
 Each question gets one of three answer types:
@@ -96,9 +94,7 @@ Don't compare the two against the same threshold. `action.act_probability` comes
 
 ## Speed
 
-<p align="center">
-  <img src="docs/assets/speed.svg" alt="Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. Ten questions over 512 tokens: 379, 430 and 708 ms." width="880">
-</p>
+Median time per request for the typed-decisions model on a base M5, in ms. These are the numbers in the chart at the top.
 
 | median ms | 1 question, 128 tokens | 1 question, 512 tokens | 10 questions, 512 tokens |
 | --- | --- | --- | --- |
