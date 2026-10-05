@@ -17,7 +17,13 @@ pub const DEFAULT_MAX_CONCURRENT: usize = 16;
 /// Round 2 of `SPEED.md`: `fuserope`, the encoder's split, RoPE and unpad expand as one Metal
 /// kernel, bit-identical to the MLX ops; if the kernel cannot be built on a machine, laya-mlx
 /// says so once on stderr at load and runs the MLX ops.
-pub const DEFAULT_TUNING: &str = "f16gelu,cache=512,wired=2048,dense_upto=1024,headprune,unpad,fuserope";
+/// Round 3 of `SPEED.md`, all bit-identical to the round 2 default: `band=512`, local attention
+/// by chunks from 512 tokens; `nax=all`, the encoder's and head's projections on MLX's NAX gemm
+/// loop (macOS 26.2 and a GPU of architecture generation 17 or later; elsewhere, or if the
+/// load-time bit check fails, laya-mlx says why on stderr and uses MLX's gemms); and the
+/// loading settings `directload,sharehead,parallel_load`. `main` also sets
+/// [`laya_mlx::MLX_ENV_DEFAULTS`] unless the user has.
+pub const DEFAULT_TUNING: &str = "f16gelu,cache=512,wired=2048,dense_upto=1024,headprune,unpad,fuserope,band=512,nax=all,directload,sharehead,parallel_load";
 
 /// Checkpoint names and their Hugging Face repos, in upstream's naming.
 pub const CHECKPOINTS: [(&str, &str); 3] = [
@@ -421,6 +427,10 @@ mod tests {
         assert_eq!((c.host.as_str(), c.port), ("127.0.0.1", 8000));
         assert_eq!(c.max_concurrent(), 16);
         assert_eq!(c.tuning, DEFAULT_TUNING);
+        // Both readers of the settings accept the default: laya-mlx at load, laya-core for
+        // `parallel_load`.
+        laya_mlx::check_settings(DEFAULT_TUNING).unwrap();
+        assert!(c.backend_options().parallel_load().unwrap());
         assert!(!c.f32 && c.api_key().is_none() && c.revision().is_none());
         let c = Config::try_parse_from([
             "sys1d",

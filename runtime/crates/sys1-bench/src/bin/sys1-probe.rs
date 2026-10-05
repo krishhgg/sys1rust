@@ -1,9 +1,10 @@
 //! Steady-state latency per request shape, for comparing backend settings quickly.
 //!
 //! sys1-probe --workload FILE [--model M] [--tuning SPEC] [--f32] [--warmup N] [--iters N]
-//!            [--order grouped|mixed] [--ab SPEC_A SPEC_B [--check]]
+//!            [--order grouped|mixed] [--ab SPEC_A SPEC_B [--check]] [--all-rows] [--rows-out FILE]
 //!
-//! Takes the first row of each shape (`shape.state_tokens`, `shape.n_questions`). `grouped` runs
+//! Takes the first row of each shape (`shape.state_tokens`, `shape.n_questions`), or with
+//! `--all-rows` every row of the workload. `grouped` runs
 //! each shape `iters` times in a row after `warmup` runs; `mixed` cycles through the shapes
 //! `iters` times, so every request follows a different shape. Prints a header with the model,
 //! the engine (device and precision) and the settings the timings were taken under, then min,
@@ -20,6 +21,13 @@
 //! compares A's and B's answers on every picked row: the largest absolute difference over the
 //! reported probabilities, over `score` and over `action.act_probability`, and whether every
 //! choice, score and noul answer is the same.
+//! With `--ab --all-rows` each row is timed on its own (warm-up and iterations per row) and
+//! every row's answers are checked; the table has one line per shape: the median over its rows
+//! of each side's per-row p50, their ratio, and the geo-mean of the per-row B/A. Without `--ab`,
+//! `--all-rows` prints one line per row. `--rows-out` writes the per-row p50s as TSV for later
+//! analysis, also without `--ab` (one p50 column). Before any timing, it is an error if the TSV
+//! file is the workload file, or if a row `id` has a tab, `\n` or `\r`, which would split its
+//! TSV line.
 //! Separate process runs on this machine differ by about 5%, which hides 3% effects; the
 //! in-process alternation is what makes the comparison usable. The two specs must agree on
 //! the process-wide MLX limits (`cache`, `wired`): both agents share one allocator, so the
@@ -42,6 +50,8 @@ fn main() -> Result<()> {
     let mut mixed = false;
     let mut ab: Option<(String, String)> = None;
     let mut check = false;
+    let mut all_rows = false;
+    let mut rows_out: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut val = || it.next().with_context(|| format!("{flag} needs a value"));
@@ -60,6 +70,8 @@ fn main() -> Result<()> {
             "--order" => mixed = parse_order(&val()?)?,
             "--ab" => ab = Some((val()?, val()?)),
             "--check" => check = true,
+            "--all-rows" => all_rows = true,
+            "--rows-out" => rows_out = Some(val()?),
             other => anyhow::bail!("unknown argument {other}"),
         }
     }
@@ -103,16 +115,20 @@ fn main() -> Result<()> {
         }
         let row: Value = serde_json::from_str(&line)?;
         let shape = format!("s{}_q{}", row["shape"]["state_tokens"], row["shape"]["n_questions"]);
-        if !picked.iter().any(|(s, _)| *s == shape) {
+        if all_rows || !picked.iter().any(|(s, _)| *s == shape) {
             picked.push((shape, row));
         }
     }
     if picked.is_empty() {
         anyhow::bail!("{workload}: no requests, nothing to time");
     }
+    if let Some(path) = rows_out.as_deref() {
+        check_rows_out_path(&workload, path)?;
+        check_row_ids(&picked, &workload, path)?;
+    }
 
     if let Some((spec_a, spec_b)) = ab {
-        return ab_run(&dir, &format!("{model}\t{sha}"), f32, &picked, &spec_a, &spec_b, warmup, iters, mixed, check);
+        return ab_run(&dir, &format!("{model}\t{sha}"), f32, &picked, &spec_a, &spec_b, warmup, iters, mixed, check, rows_out.as_deref());
     }
 
     let opts = BackendOptions { f32, tuning: Some(spec.clone()), ..Default::default() };
@@ -160,6 +176,14 @@ fn main() -> Result<()> {
         println!("{shape}\t{}\t{:.1}\t{:.1}\t{:.1}", tokens[i], t[0], p50, t[t.len() - 1]);
     }
     println!("geo_p50\t{:.1}", geo_mean(&p50s));
+    if let Some(path) = rows_out.as_deref() {
+        let mut tsv = String::from("row\tshape\ttokens\tp50\n");
+        for (i, (shape, row)) in picked.iter().enumerate() {
+            let id = row["id"].as_str().unwrap_or("");
+            tsv.push_str(&format!("{id}\t{shape}\t{}\t{:.3}\n", tokens[i], p50s[i]));
+        }
+        std::fs::write(path, tsv).with_context(|| format!("write {path}"))?;
+    }
     print_mlx_mb();
     Ok(())
 }
@@ -205,6 +229,7 @@ fn ab_run(
     iters: usize,
     mixed: bool,
     check: bool,
+    rows_out: Option<&str>,
 ) -> Result<()> {
     let load = |spec: &str| -> Result<Agent> {
         let opts = BackendOptions { f32, tuning: Some(spec.to_string()), ..Default::default() };
@@ -247,12 +272,39 @@ fn ab_run(
         }
     }
 
-    println!("shape\ttokens\tp50_A\tp50_B\tB/A");
-    let mut ratios = Vec::with_capacity(picked.len());
-    for (i, (shape, _)) in picked.iter().enumerate() {
-        let (a, b) = (p50(&times[0][i]), p50(&times[1][i]));
-        ratios.push(b / a);
-        println!("{shape}\t{}\t{a:.1}\t{b:.1}\t{:.3}", tokens[i], b / a);
+    let row_a: Vec<f64> = times[0].iter().map(|t| p50(t)).collect();
+    let row_b: Vec<f64> = times[1].iter().map(|t| p50(t)).collect();
+    if let Some(path) = rows_out {
+        let mut tsv = String::from("row\tshape\ttokens\tp50_A\tp50_B\n");
+        for (i, (shape, row)) in picked.iter().enumerate() {
+            let id = row["id"].as_str().unwrap_or("");
+            tsv.push_str(&format!("{id}\t{shape}\t{}\t{:.3}\t{:.3}\n", tokens[i], row_a[i], row_b[i]));
+        }
+        std::fs::write(path, tsv).with_context(|| format!("write {path}"))?;
+    }
+    let groups = shape_groups(picked);
+    let mut ratios = Vec::with_capacity(groups.len());
+    if groups.len() == picked.len() {
+        println!("shape\ttokens\tp50_A\tp50_B\tB/A");
+        for (i, (shape, _)) in picked.iter().enumerate() {
+            let (a, b) = (row_a[i], row_b[i]);
+            ratios.push(b / a);
+            println!("{shape}\t{}\t{a:.1}\t{b:.1}\t{:.3}", tokens[i], b / a);
+        }
+    } else {
+        // Several rows per shape: the median over the rows of each side's per-row p50 (the
+        // harness's per-shape figure), their ratio, and the geo-mean of the per-row ratios.
+        println!("shape\trows\ttokens_med\tmed_p50_A\tmed_p50_B\tB/A\tgeo_rows_B/A");
+        for (shape, idx) in &groups {
+            let pick = |v: &[f64]| -> Vec<f64> { idx.iter().map(|&i| v[i]).collect() };
+            let (a, b) = (median(&pick(&row_a)), median(&pick(&row_b)));
+            let per_row: Vec<f64> = idx.iter().map(|&i| row_b[i] / row_a[i]).collect();
+            let tok = median(&idx.iter().map(|&i| tokens[i] as f64).collect::<Vec<_>>());
+            ratios.push(b / a);
+            println!("{shape}\t{}\t{tok:.0}\t{a:.2}\t{b:.2}\t{:.4}\t{:.4}", idx.len(), b / a, geo_mean(&per_row));
+        }
+        let all: Vec<f64> = row_a.iter().zip(&row_b).map(|(a, b)| b / a).collect();
+        println!("geo_rows_B/A\t{:.4}", geo_mean(&all));
     }
     println!("geo_B/A\t{:.3}", geo_mean(&ratios));
     if check {
@@ -328,6 +380,56 @@ fn p50(times: &[f64]) -> f64 {
     let mut t = times.to_vec();
     t.sort_by(|a, b| a.partial_cmp(b).unwrap());
     t[t.len() / 2]
+}
+
+/// `--rows-out` must not name the workload, or the TSV would overwrite the requests it timed.
+/// The same file counts by device and inode, so a link to the workload is refused too. A path
+/// that does not exist yet passes.
+fn check_rows_out_path(workload: &str, path: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(w), Ok(out)) = (std::fs::metadata(workload), std::fs::metadata(path)) else {
+        return Ok(());
+    };
+    if (w.dev(), w.ino()) == (out.dev(), out.ino()) {
+        anyhow::bail!("--rows-out {path} is the workload file {workload}; the TSV would overwrite its requests");
+    }
+    Ok(())
+}
+
+/// `--rows-out` writes each picked row's `id` into one TSV cell, so an id with a tab, `\n` or
+/// `\r` is an error naming the id, the workload and the TSV file.
+fn check_row_ids(picked: &[(String, Value)], workload: &str, path: &str) -> Result<()> {
+    for (_, row) in picked {
+        let id = row["id"].as_str().unwrap_or("");
+        if id.contains(['\t', '\n', '\r']) {
+            anyhow::bail!("--rows-out {path}: the row of {workload} with id {id:?} has a tab or line break in its id, which would split its TSV line");
+        }
+    }
+    Ok(())
+}
+
+/// Median of a sample, the mean of the two middle values for an even count.
+fn median(xs: &[f64]) -> f64 {
+    let mut t = xs.to_vec();
+    t.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = t.len();
+    if n % 2 == 1 {
+        t[n / 2]
+    } else {
+        (t[n / 2 - 1] + t[n / 2]) / 2.0
+    }
+}
+
+/// The shapes of the picked rows in first-seen order, each with the indices of its rows.
+fn shape_groups(picked: &[(String, Value)]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, (shape, _)) in picked.iter().enumerate() {
+        match groups.iter_mut().find(|(s, _)| s == shape) {
+            Some(g) => g.1.push(i),
+            None => groups.push((shape.clone(), vec![i])),
+        }
+    }
+    groups
 }
 
 fn geo_mean(xs: &[f64]) -> f64 {
@@ -517,6 +619,51 @@ mod tests {
         assert!(h.contains("engine\tmlx(gpu,f32)\n") && h.ends_with("settings\t(none)\n"), "{h}");
         let h = header("english\t55cf4c4", "mlx(gpu,f16)", &[("A", "f16gelu"), ("B", "f16gelu,unpad")]);
         assert!(h.ends_with("A\tf16gelu\nB\tf16gelu,unpad\n"), "{h}");
+    }
+
+    /// An id with a tab, `\n` or `\r` fails `--rows-out` with the id as Rust prints it, the
+    /// workload and the TSV file; other ids pass.
+    #[test]
+    fn rows_out_rejects_ids_that_split_a_line() {
+        let row = |id: &str| ("s64_q1".to_string(), serde_json::json!({ "id": id }));
+        assert!(check_row_ids(&[row("a-1"), row("b 2"), row("")], "w.jsonl", "rows.tsv").is_ok());
+        for (id, shown) in [("a\tb", r#""a\tb""#), ("a\nb", r#""a\nb""#), ("a\rb", r#""a\rb""#)] {
+            let e = check_row_ids(&[row("ok"), row(id)], "w.jsonl", "rows.tsv").unwrap_err().to_string();
+            assert!(e.contains(shown) && e.contains("w.jsonl") && e.contains("rows.tsv"), "{e}");
+        }
+    }
+
+    /// `--rows-out` naming the workload, by its path or through a link, fails; another file
+    /// or a path that does not exist passes.
+    #[test]
+    fn rows_out_must_not_be_the_workload() {
+        let dir = std::env::temp_dir().join(format!("sys1-probe-rows-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_string();
+        std::fs::write(path("w.jsonl"), "{}\n").unwrap();
+        std::fs::write(path("other.tsv"), "").unwrap();
+        std::os::unix::fs::symlink(path("w.jsonl"), path("link.tsv")).unwrap();
+        std::fs::hard_link(path("w.jsonl"), path("hard.tsv")).unwrap();
+        for out in [path("w.jsonl"), path("link.tsv"), path("hard.tsv"), format!("{}/./w.jsonl", dir.display())] {
+            let e = check_rows_out_path(&path("w.jsonl"), &out).unwrap_err().to_string();
+            assert!(e.contains("is the workload file"), "{out}: {e}");
+        }
+        assert!(check_rows_out_path(&path("w.jsonl"), &path("other.tsv")).is_ok());
+        assert!(check_rows_out_path(&path("w.jsonl"), &path("new.tsv")).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn median_and_shape_groups() {
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), 2.5);
+        let row = |s: &str| (s.to_string(), Value::Null);
+        let picked = [row("s64_q1"), row("s64_q1"), row("s128_q1"), row("s64_q1")];
+        assert_eq!(
+            shape_groups(&picked),
+            vec![("s64_q1".to_string(), vec![0, 1, 3]), ("s128_q1".to_string(), vec![2])]
+        );
     }
 
     #[test]

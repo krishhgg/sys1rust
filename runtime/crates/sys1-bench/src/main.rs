@@ -30,6 +30,9 @@ struct Variant {
     name: &'static str,
     notes: &'static str,
     opts: fn() -> BackendOptions,
+    /// Set laya-mlx's MLX environment defaults (`MLX_ENV_DEFAULTS`) that the caller has not
+    /// set, as sys1d does.
+    mlx_env: bool,
 }
 
 fn tuned(tuning: &str) -> BackendOptions {
@@ -42,11 +45,13 @@ const VARIANTS: [Variant; 6] = [
         notes: "laya-r-mlx 914c9a7 as forked, unchanged: fp16 weights, questions in one batch padded to the \
                 longest row. Its GELU promotes activations to fp32 from the first MLP on.",
         opts: || tuned(""),
+        mlx_env: false,
     },
     Variant {
         name: "mlx-fp16-fix",
         notes: "mlx-fp16 with GELU kept in fp16, so activations and gemms stay fp16.",
         opts: || tuned("f16gelu"),
+        mlx_env: false,
     },
     Variant {
         name: "mlx-fp16-fast",
@@ -54,23 +59,29 @@ const VARIANTS: [Variant; 6] = [
                 grow to about the size of RAM when request lengths vary) and a 2 GiB wired limit so \
                 the weights stay resident.",
         opts: || tuned("f16gelu,cache=512,wired=2048"),
+        mlx_env: false,
     },
     Variant {
         name: "mlx-fp16-lean",
         notes: "mlx-fp16-fast plus the results/SPEED.md work reductions, the sys1d default: dense local \
                 attention up to 1,024 tokens, the last head layer only at the scorer's rows, no computing \
-                on padding, and (round 2) the split + RoPE + unpad expand as one Metal kernel.",
-        opts: || tuned("f16gelu,cache=512,wired=2048,dense_upto=1024,headprune,unpad,fuserope"),
+                on padding, (round 2) the split + RoPE + unpad expand as one Metal kernel, and (round 3) \
+                local attention by chunks from 512 tokens, the projections on MLX's NAX gemm loop, the \
+                loading settings, and MLX_MAX_MB_PER_BUFFER=10 unless set.",
+        opts: || tuned("f16gelu,cache=512,wired=2048,dense_upto=1024,headprune,unpad,fuserope,band=512,nax=all,directload,sharehead,parallel_load"),
+        mlx_env: true,
     },
     Variant {
         name: "mlx-env",
         notes: "Exploration only: backend settings from the SYS1_MLX environment variable.",
         opts: || tuned(&std::env::var("SYS1_MLX").unwrap_or_default()),
+        mlx_env: false,
     },
     Variant {
         name: "mlx-fp32",
         notes: "Same as mlx-fp16 with the transformer in fp32.",
         opts: || BackendOptions { f32: true, ..tuned("") },
+        mlx_env: false,
     },
 ];
 
@@ -83,6 +94,13 @@ fn mlx_mb() -> Value {
         "cache": mb(mlx_rs::memory::cache_memory()),
         "peak": mb(mlx_rs::memory::peak_memory()),
     })
+}
+
+/// The MLX environment variables in `MLX_ENV_DEFAULTS` as this process sees them, null when
+/// unset, whoever set them.
+fn mlx_env() -> Value {
+    let vars = laya_mlx::MLX_ENV_DEFAULTS.iter().map(|(key, _)| (key.to_string(), json!(std::env::var(key).ok())));
+    Value::Object(vars.collect())
 }
 
 fn now_unix() -> f64 {
@@ -176,6 +194,10 @@ fn main() -> Result<()> {
         .iter()
         .find(|v| v.name == args.variant)
         .with_context(|| format!("unknown variant {}", args.variant))?;
+    if variant.mlx_env {
+        // Before any MLX call (MLX reads these once) and while this is the only thread.
+        laya_mlx::set_mlx_env_defaults();
+    }
     let opts = (variant.opts)();
     if let Some(spec) = &opts.tuning {
         // The meta line labels the run with these settings, so one the backend would not apply
@@ -197,7 +219,7 @@ fn main() -> Result<()> {
         "model_sha": sha, "code_version": std::env::var("SYS1_CODE_VERSION").unwrap_or_else(|_| "unknown".into()),
         "backend": "mlx", "mode": "inproc", "load_ms": (load_ms * 10.0).round() / 10.0,
         "pid": std::process::id(), "t_process_start": t_process_start,
-        "engine": agent.backend_name(), "tuning": opts.tuning, "warmup": args.warmup, "repeats": args.repeats, "duration": args.duration,
+        "engine": agent.backend_name(), "tuning": opts.tuning, "mlx_env": mlx_env(), "warmup": args.warmup, "repeats": args.repeats, "duration": args.duration,
     });
     writeln!(out, "{meta}")?;
 

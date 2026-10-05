@@ -28,7 +28,8 @@ VARIANTS = [
     {"variant": "http-fp16-fast", "tuning": None,
      "notes": "sys1d with its default engine settings. Since the speed round these are the mlx-fp16-lean "
               "settings (f16gelu, 512 MiB MLX cache, 2 GiB wired, dense local attention up to 1,024 tokens, "
-              "head pruning, unpadding); runs before that used the mlx-fp16-fast settings. The name is kept "
+              "head pruning, unpadding, and since rounds 2 and 3 fuserope, band=512, nax=all, the loading "
+              "settings and MLX_MAX_MB_PER_BUFFER=10); runs before that used the mlx-fp16-fast settings. The name is kept "
               "so earlier result paths stay valid. One inference thread, admission limit 16. Supports "
               "--concurrency K (K client threads, one kept-alive connection each)."},
 ]
