@@ -23,5 +23,9 @@ laya-r-mlx's NOTICE, kept as required:
 runtime/vendor/mlx-sys is mlx-sys 0.6.0 (https://github.com/oxiglade/mlx-rs, MIT OR Apache-2.0)
 with a patched build.rs that can link a prebuilt MLX.
 
+runtime/crates/laya-mlx/src/kernels/mlx holds 5 Metal headers copied unchanged from MLX 0.32.2
+(https://github.com/ml-explore/mlx), Copyright 2023 Apple Inc., licensed under the MIT License
+(see runtime/crates/laya-mlx/src/kernels/mlx/LICENSE).
+
 bench/workloads are built from the typed-decisions benchmark states; bench/reference holds
 answers from upstream Laya (PyTorch, fp32, CPU) on those workloads.

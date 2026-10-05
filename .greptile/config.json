@@ -4,7 +4,7 @@
   "triggerOnUpdates": true,
   "includeBranches": ["**"],
   "statusCheck": true,
-  "ignorePatterns": "runtime/vendor/mlx-sys/src/mlx-c/**\n**/Cargo.lock\nbench/reference/**\nbench/workloads/*.jsonl\nresults/summary.json\nresults/tables.md",
+  "ignorePatterns": "runtime/vendor/mlx-sys/src/mlx-c/**\nruntime/crates/laya-mlx/src/kernels/mlx/**\n**/Cargo.lock\nbench/reference/**\nbench/workloads/*.jsonl\nresults/summary.json\nresults/tables.md",
   "instructions": "sys1rust is a local runtime for Laya System 1 decision models (ModernBERT or mmBERT encoder, a 2-layer transformer decision head, a scorer at per-option [MASK] markers). runtime/ is a Rust workspace: laya-core (tokenizer, request parsing, sequence layout, decoding; no GPU code), laya-mlx (the forward pass on Apple's MLX through mlx-rs; custom Metal kernels, compiled at run time through the vendored mlx-sys C API, are being added in follow-up PRs), sys1d (an axum HTTP server that must match upstream `laya serve` byte for byte at the protocol level) and sys1-bench (bench adapter and probe). bench/ is a Python harness that runs contenders on shared workloads and compares answers to upstream fp32 references. results/ and research/ are measured write-ups. Review for correctness first: answers must stay identical to upstream Laya (choice agreement of 99% or more against bench/reference, probabilities within about 1e-3 of the old path for pure speed changes). Then for performance on the inference path, then for clarity. Point out claims in docs that the code or data in the PR does not support.",
   "rules": [
     {
