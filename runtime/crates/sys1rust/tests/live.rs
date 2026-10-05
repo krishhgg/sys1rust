@@ -344,7 +344,10 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         if let Ok(None) = self.0.try_wait() {
-            eprintln!("killing sys1rust (pid {}) that is still running", self.0.id());
+            eprintln!(
+                "killing sys1rust (pid {}) that is still running",
+                self.0.id()
+            );
             let _ = self.0.kill();
             let _ = self.0.wait();
         }
