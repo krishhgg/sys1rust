@@ -12,7 +12,8 @@
 //! `results/SPEED.md`): `dense_upto` (the dense/chunked local-attention switch), `headprune`
 //! (last head layer only on the rows the scorer reads) and `unpad` (hidden states packed to
 //! the real tokens outside attention). `fuserope` (round 2) runs the encoder's qkv split,
-//! head reshape, RoPE and unpad expand as one custom Metal kernel (`split_rope.rs`).
+//! head reshape, RoPE and unpad expand as one custom Metal kernel (`split_rope.rs`). `band`
+//! (round 3) runs the local layers' attention by chunks in a layout that kernel writes.
 //! Experiments that gained nothing (`split`, `rope1`, `splitk`) were removed after commit
 //! 0495800; that commit has their code.
 
@@ -110,6 +111,17 @@ struct Knobs {
     /// not compile or does not match the MLX ops on this machine) the load prints one line to
     /// stderr and the forward runs the MLX ops instead.
     fuserope: bool,
+    /// Banded local attention from this padded length up (`band=512`; 0, the default, is off).
+    /// The local layers attend by chunks of `window` queries against the `3 * window` keys
+    /// their window can reach, in a layout the `fuserope` kernel writes directly (see
+    /// [`SplitRope::apply_band`]), instead of the dense `len x len` attention with a window
+    /// mask, or the gathered chunks above `dense_upto`. It takes precedence over both, and over
+    /// `windowed=0`. Exact: every query sees the same keys in the same key blocks of MLX's
+    /// attention kernel (32 keys at head dim 64 in MLX 0.32.2; the windows start at multiples
+    /// of 64 positions), and the blocks the layout adds are fully masked and add exact zeros
+    /// (checked bit for bit in `tests/settings.rs`). Needs `fuserope` and additive masks;
+    /// without them the load prints why and the local layers run as if `band` were 0.
+    band: usize,
 }
 
 impl Knobs {
@@ -144,6 +156,7 @@ impl Knobs {
             headprune: false,
             unpad: false,
             fuserope: false,
+            band: 0,
         };
         for kv in spec.split(',').filter(|s| !s.is_empty()) {
             let (key, val) = match kv.split_once('=') {
@@ -198,6 +211,7 @@ impl Knobs {
                 "headprune" => k.headprune = flag()?,
                 "unpad" => k.unpad = flag()?,
                 "fuserope" => k.fuserope = flag()?,
+                "band" => k.band = number(value()?)?,
                 _ => return Err(Error::Config(format!("mlx settings: unknown setting `{key}` in `{spec}`"))),
             }
         }
@@ -220,6 +234,61 @@ impl<T> Lx<T> for std::result::Result<T, mlx_rs::error::Exception> {
     fn lx(self) -> Result<T> {
         self.map_err(|e| Error::Backend(e.to_string()))
     }
+}
+
+/// Whether two float arrays have the same dtype, shape and bits. The load-time kernel checks
+/// use it: `==` would let a -0 pass for a 0 and fail a NaN against itself.
+pub(crate) fn same_bits(a: &Array, b: &Array) -> Result<bool> {
+    if a.dtype() != b.dtype() {
+        return Ok(false);
+    }
+    let bits = |x: &Array| x.view_dtype(if x.dtype() == Dtype::Float32 { Dtype::Uint32 } else { Dtype::Uint16 });
+    bits(a).lx()?.eq_exact(bits(b).lx()?).lx()
+}
+
+/// The kernel-fallback rule for `fuserope` and `band`: both are decided here, at load, never
+/// in a request. Returns the kernel and the padded length from which the local layers take the
+/// banded path. `build` builds the kernel and runs its load check, of the banded launches too
+/// when passed `true` ([`SplitRope::new`]). A kernel that cannot be built or whose plain
+/// launches do not reproduce the MLX ops turns both off; banded launches that do not turn off
+/// `band` only, and the kernel serves the shorter batches. Each fallback prints one line.
+fn rope_kernels(
+    knobs: &Knobs,
+    cpu: bool,
+    build: impl FnOnce(bool) -> Result<(SplitRope, Option<Error>)>,
+) -> (Option<SplitRope>, Option<usize>) {
+    let (split_rope, band_off) = match (knobs.fuserope, cpu) {
+        (false, _) => (None, None),
+        (true, true) => {
+            eprintln!("laya-mlx: fuserope needs the GPU; the CPU backend runs the MLX split and rope ops instead");
+            (None, None)
+        }
+        (true, false) => match build(knobs.band > 0 && !knobs.bool_mask) {
+            Ok((k, band_off)) => (Some(k), band_off),
+            Err(e) => {
+                eprintln!("laya-mlx: fuserope is off for this load, the MLX split and rope ops run instead: {e}");
+                (None, None)
+            }
+        },
+    };
+    // `band` needs the kernel's banded launches, checked by `build`, and additive masks.
+    let band_from = match (knobs.band, &split_rope, band_off) {
+        (0, _, _) => None,
+        _ if knobs.bool_mask => {
+            eprintln!("laya-mlx: band needs additive masks; with mask=bool the local layers run the dense or chunked attention instead");
+            None
+        }
+        (_, None, _) => {
+            eprintln!("laya-mlx: band needs the fuserope kernel, which is off for this load; the local layers run the dense or chunked attention instead");
+            None
+        }
+        (_, Some(_), Some(e)) => {
+            eprintln!("laya-mlx: band is off for this load, the local layers run the dense or chunked attention instead: {e}");
+            None
+        }
+        (b, Some(_), None) => Some(b),
+    };
+    (split_rope, band_from)
 }
 
 /// A compiled MLX function `&[Array] -> Vec<Array>`.
@@ -601,8 +670,12 @@ pub struct MlxBackend {
     band: Array,
     caches: Mutex<Caches>,
     geglu: GeGlu,
-    /// The `fuserope` kernel when the setting is on and the kernel passed its load-time check.
+    /// The `fuserope` kernel when the setting is on and its plain launches passed their
+    /// load-time check.
     split_rope: Option<SplitRope>,
+    /// The padded length from which the local layers take the banded path: `band` when it is
+    /// set, masks are additive and `split_rope` passed its banded check at load; else `None`.
+    band_from: Option<usize>,
     knobs: Knobs,
 }
 
@@ -647,6 +720,21 @@ enum LocalAttn {
     /// Chunked attention: every 64-query chunk attends to the 192 keys that can fall inside
     /// its window (previous, own and next chunk); see [`MlxBackend::windowed_attention`].
     Windowed(Windowed),
+    /// Chunked attention in the layout the `fuserope` kernel writes (`band`); see [`Banded`].
+    Banded(Banded),
+}
+
+/// Constants of the banded local attention for one batch shape: sdpa runs over `n * nc` chunk
+/// batches of `H` heads, `S` queries and `3S` keys, straight from [`SplitRope::apply_band`].
+struct Banded {
+    /// Additive mask `[n * nc, 1, S, 3S]`: at the keys a chunk holds, the sum of the window
+    /// mask and the pad mask the dense path uses; at its slots outside the sequence, `MASK_NEG`
+    /// plus the window mask. sdpa broadcasts it over the heads.
+    mask: Array,
+    n_chunks: i32,
+    /// With `unpad`, the `[T]` positions `r * nc * S + pos` of the real tokens in the
+    /// `[n, nc * S, d]` output: the packing's compaction for this layout.
+    pack: Option<Array>,
 }
 
 /// Constants of the chunked sliding-window attention for one batch shape.
@@ -860,29 +948,17 @@ impl MlxBackend {
                     )?,
                 });
             }
-            // The kernel-fallback rule: `fuserope` is decided here, at load, never in a
-            // request. A kernel that cannot be built or does not reproduce the MLX ops on this
-            // machine is reported once and the MLX path serves instead.
-            let split_rope = match (knobs.fuserope, cpu) {
-                (false, _) => None,
-                (true, true) => {
-                    eprintln!("laya-mlx: fuserope needs the GPU; the CPU backend runs the MLX split and rope ops instead");
-                    None
-                }
-                (true, false) => match SplitRope::new(
+            let (split_rope, band_from) = rope_kernels(&knobs, cpu, |band| {
+                SplitRope::new(
                     enc.num_attention_heads,
                     enc.head_dim(),
                     dtype,
                     enc.global_rope_theta as f32,
                     enc.local_rope_theta as f32,
-                ) {
-                    Ok(k) => Some(k),
-                    Err(e) => {
-                        eprintln!("laya-mlx: fuserope is off for this load, the MLX split and rope ops run instead: {e}");
-                        None
-                    }
-                },
-            };
+                    enc.local_attention / 2,
+                    band,
+                )
+            });
             let this = Self {
                 cpu,
                 dtype,
@@ -908,6 +984,7 @@ impl MlxBackend {
                 caches: Mutex::new(Caches::default()),
                 geglu: GeGlu::new(&knobs.geglu, knobs.f16gelu),
                 split_rope,
+                band_from,
                 knobs: knobs.clone(),
             };
             // Materialise every weight (and transposed view) once, up front.
@@ -1004,12 +1081,14 @@ impl MlxBackend {
     }
 
     /// Masks for this batch: dense window masks for short inputs, chunked gather indices and
-    /// masks once the sequence is long enough for windowing to pay off. With `mask=bool` every
-    /// mask is boolean, whichever path the length takes.
-    fn attn_ctx(&self, batch: &Batch) -> Result<AttnCtx> {
+    /// masks once the sequence is long enough for windowing to pay off, or the banded masks
+    /// from the `band` length up. With `mask=bool` every mask is boolean, whichever path the
+    /// length takes (`band` is off then). `packed` says whether the encoder packs this batch.
+    fn attn_ctx(&self, batch: &Batch, packed: bool) -> Result<AttnCtx> {
         let has_local = self.layers.iter().any(|l| l.local);
         let dense_upto = self.knobs.dense_upto.unwrap_or(4 * self.window);
         let windowed = self.knobs.windowed && batch.len > dense_upto;
+        let banded = self.band_from.is_some_and(|from| batch.len >= from);
         let (n, len) = (batch.n as i32, batch.len as i32);
         let pad = if self.knobs.bool_mask {
             Array::from_slice(&batch.attention_mask, &[n, 1, 1, len])
@@ -1020,6 +1099,8 @@ impl MlxBackend {
         };
         let local = if !has_local {
             LocalAttn::Dense(pad.clone())
+        } else if banded {
+            LocalAttn::Banded(self.banded_ctx(batch, packed)?)
         } else if windowed {
             LocalAttn::Windowed(self.windowed_ctx(batch)?)
         } else if self.knobs.bool_mask {
@@ -1067,6 +1148,35 @@ impl MlxBackend {
             key_idx,
             mask,
             n_chunks: nc,
+        })
+    }
+
+    /// The banded path's constants for this batch (see [`Banded`]). The mask holds the dense
+    /// path's values: [`window_key_valid`] is the pad mask at each slot's position, `MASK_NEG`
+    /// outside the sequence, and `self.band` is the window mask at each slot's offset.
+    fn banded_ctx(&self, batch: &Batch, packed: bool) -> Result<Banded> {
+        let (n, len, s) = (batch.n, batch.len, self.window);
+        let nc = len.div_ceil(s);
+        let ks = 3 * s;
+        let key_ok = window_key_valid(&batch.attention_mask, n, len, s, nc);
+        let vals: Vec<f32> = key_ok.iter().map(|&ok| if ok { 0.0 } else { MASK_NEG }).collect();
+        let valid = Array::from_slice(&vals, &[(n * nc) as i32, 1, 1, ks as i32]).as_dtype(self.dtype).lx()?;
+        let band = self.band.reshape(&[1, 1, s as i32, ks as i32]).lx()?;
+        let mask = ops::add(&valid, &band).lx()?;
+        let pack = packed.then(|| {
+            let pack: Vec<u32> = (0..n)
+                .flat_map(|r| {
+                    (0..len)
+                        .filter(move |&pos| batch.attention_mask[r * len + pos] == 1)
+                        .map(move |pos| (r * nc * s + pos) as u32)
+                })
+                .collect();
+            Array::from_slice(&pack, &[pack.len() as i32])
+        });
+        Ok(Banded {
+            mask,
+            n_chunks: nc as i32,
+            pack,
         })
     }
 
@@ -1263,7 +1373,7 @@ impl MlxBackend {
         };
         h = self.emb_norm.apply(&h)?;
 
-        let ctx = self.attn_ctx(batch)?;
+        let ctx = self.attn_ctx(batch, packing.is_some())?;
         let scale = 1.0 / (self.head_dim as f32).sqrt();
         let mut lt: Vec<u128> = Vec::new();
         if self.knobs.layers {
@@ -1290,9 +1400,16 @@ impl MlxBackend {
             Ok(())
         };
         mark("emb+masks", &[&h])?;
-        // The `fuserope` kernel with `[n, len]` as its `dims` input: the batch shape goes in
-        // as data, so one pipeline serves every shape. Nothing is built when the kernel is off.
-        let fused = self.split_rope.as_ref().map(|kernel| (kernel, Array::from_slice(&[n, len], &[2])));
+        // The `fuserope` kernel with `[n, len, nc]` as its `dims` input (`nc` is the chunk count
+        // of the banded layout, read by the banded launches only): the batch shape goes in as
+        // data, so one pipeline serves every shape. Nothing is built when the kernel is off.
+        let fused = self.split_rope.as_ref().map(|kernel| {
+            let nc = match &ctx.local {
+                LocalAttn::Banded(b) => b.n_chunks,
+                _ => 1,
+            };
+            (kernel, Array::from_slice(&[n, len, nc], &[3]))
+        });
         for layer in &self.layers {
             let t = std::time::Instant::now();
             let a = match &layer.attn_norm {
@@ -1301,39 +1418,73 @@ impl MlxBackend {
             };
             mark("attn_norm", &[&a])?;
             let qkv = layer.wqkv.apply(&a)?;
-            let (q, k, v) = match &fused {
-                // The kernel reads the packed rows through the unpack index itself.
-                Some((kernel, dims)) => {
+            // Attention output as `[n, len, d]`, or `[T, d]` when packed.
+            let att = match (&ctx.local, layer.local, &fused) {
+                (LocalAttn::Banded(bd), true, Some((kernel, dims))) => {
                     mark("wqkv", &[&qkv])?;
-                    kernel.apply(&qkv, packing.as_ref().map(|p| &p.unpack), dims, layer.local, n, len)?
-                }
-                None => {
-                    // Packed: back to `[n, len, 3d]` for attention.
-                    let qkv = match &packing {
-                        Some(p) => p.expand(&qkv, n, len)?,
-                        None => qkv,
+                    let unpack = packing.as_ref().map(|p| &p.unpack);
+                    let (nc, s) = (bd.n_chunks, self.window as i32);
+                    let (q, k, v) = if n == 1 {
+                        // One row: every position written once, the chunk windows as views.
+                        let (q, k, v) = kernel.apply_band(&qkv, unpack, dims, layer.local, n, nc, true)?;
+                        split_rope::band_views(&q, &k, &v, nc, s, self.n_heads as i32, self.head_dim as i32)?
+                    } else {
+                        kernel.apply_band(&qkv, unpack, dims, layer.local, n, nc, false)?
                     };
-                    mark("wqkv", &[&qkv])?;
-                    self.qkv_rope(&qkv, n, len, layer.rope_theta)?
+                    mark("split+rope", &[&q, &k, &v])?;
+                    let att = fast::scaled_dot_product_attention(&q, &k, &v, scale, &bd.mask, None::<&Array>).lx()?;
+                    mark("sdpa_local", &[&att])?;
+                    // `[n * nc, H, S, hd]` -> `[n, nc * S, d]`: heads merged, chunks back in
+                    // position order.
+                    let att = att.transpose_axes(&[0, 2, 1, 3]).lx()?.reshape(&[n, nc * s, d]).lx()?;
+                    match &bd.pack {
+                        Some(pack) => att.reshape(&[n * nc * s, d]).lx()?.take_axis(pack, 0).lx()?,
+                        None if nc * s == len => att,
+                        None => att.index((.., ..len, ..)),
+                    }
                 }
-            };
-            mark("split+rope", &[&q, &k, &v])?;
-            let att = match (&ctx.local, layer.local) {
-                (LocalAttn::Windowed(w), true) => self.windowed_attention(&q, &k, &v, w, scale)?,
-                (LocalAttn::Dense(mask), true) => {
-                    fast::scaled_dot_product_attention(&q, &k, &v, scale, mask, None::<&Array>)
-                        .lx()?
+                (LocalAttn::Banded(_), true, None) => {
+                    return Err(Error::Backend("band: the banded layout needs the fuserope kernel".into()));
                 }
-                (_, false) => {
-                    fast::scaled_dot_product_attention(&q, &k, &v, scale, &ctx.pad, None::<&Array>)
-                        .lx()?
+                _ => {
+                    let (q, k, v) = match &fused {
+                        // The kernel reads the packed rows through the unpack index itself.
+                        Some((kernel, dims)) => {
+                            mark("wqkv", &[&qkv])?;
+                            kernel.apply(&qkv, packing.as_ref().map(|p| &p.unpack), dims, layer.local, n, len)?
+                        }
+                        None => {
+                            // Packed: back to `[n, len, 3d]` for attention.
+                            let qkv = match &packing {
+                                Some(p) => p.expand(&qkv, n, len)?,
+                                None => qkv,
+                            };
+                            mark("wqkv", &[&qkv])?;
+                            self.qkv_rope(&qkv, n, len, layer.rope_theta)?
+                        }
+                    };
+                    mark("split+rope", &[&q, &k, &v])?;
+                    let att = match (&ctx.local, layer.local) {
+                        (LocalAttn::Windowed(w), true) => self.windowed_attention(&q, &k, &v, w, scale)?,
+                        (LocalAttn::Dense(mask), true) => {
+                            fast::scaled_dot_product_attention(&q, &k, &v, scale, mask, None::<&Array>)
+                                .lx()?
+                        }
+                        (LocalAttn::Banded(_), true) => {
+                            return Err(Error::Backend("band: a local layer missed the banded path".into()));
+                        }
+                        (_, false) => {
+                            fast::scaled_dot_product_attention(&q, &k, &v, scale, &ctx.pad, None::<&Array>)
+                                .lx()?
+                        }
+                    };
+                    mark(if layer.local { "sdpa_local" } else { "sdpa_global" }, &[&att])?;
+                    let att = self.merge_heads(&att, n, len)?;
+                    match &packing {
+                        Some(p) => p.compact(&att, n, len)?,
+                        None => att,
+                    }
                 }
-            };
-            mark(if layer.local { "sdpa_local" } else { "sdpa_global" }, &[&att])?;
-            let att = self.merge_heads(&att, n, len)?;
-            let att = match &packing {
-                Some(p) => p.compact(&att, n, len)?,
-                None => att,
             };
             h = self.lin_add(&layer.wo, &att, &h)?;
             mark("merge+wo", &[&h])?;
@@ -1484,9 +1635,10 @@ impl Backend for MlxBackend {
     }
 
     fn active_kernels(&self) -> &'static [&'static str] {
-        match self.split_rope {
-            Some(_) => &["fuserope"],
-            None => &[],
+        match (&self.split_rope, self.band_from) {
+            (Some(_), Some(_)) => &["fuserope", "band"],
+            (Some(_), None) => &["fuserope"],
+            (None, _) => &[],
         }
     }
 
@@ -1549,6 +1701,48 @@ impl Backend for MlxBackend {
 mod tests {
     use super::*;
 
+    /// `same_bits` tells a -0 from a 0 and passes a NaN against the same NaN, in f32, f16 and
+    /// bf16; a different dtype or shape with the same bits is not the same.
+    #[test]
+    fn same_bits_tells_signed_zeros_apart() {
+        let pos = Array::from_slice(&[1.5f32, 0.0, f32::NAN], &[3]);
+        let neg = Array::from_slice(&[1.5f32, -0.0, f32::NAN], &[3]);
+        for dtype in [Dtype::Float32, Dtype::Float16, Dtype::Bfloat16] {
+            let (p, n) = (pos.as_dtype(dtype).unwrap(), neg.as_dtype(dtype).unwrap());
+            assert!(ops::eq(&p, &n).unwrap().index(1).item_exact::<bool>(), "{dtype:?}: == passes -0 for 0");
+            assert!(!same_bits(&p, &n).unwrap(), "{dtype:?}: -0 against 0");
+            assert!(same_bits(&p, &p).unwrap(), "{dtype:?}: NaN against itself");
+        }
+        let h = pos.as_dtype(Dtype::Float16).unwrap();
+        assert!(!same_bits(&h, &h.view_dtype(Dtype::Bfloat16).unwrap()).unwrap(), "f16 against bf16 with the same bits");
+        assert!(!same_bits(&pos, &pos.reshape(&[3, 1]).unwrap()).unwrap(), "[3] against [3, 1]");
+    }
+
+    /// The load's `fuserope` and `band` decision. A kernel that passes its check serves both.
+    /// One whose banded launches fail keeps `fuserope` with `band` off, so `active_kernels`
+    /// lists fuserope alone. One that fails to build or whose plain launch fails turns both
+    /// off. With `mask=bool` the banded launches are not built or checked, and a CPU load
+    /// builds no kernel. Uses the GPU.
+    #[test]
+    fn a_failed_band_check_keeps_fuserope() {
+        let knobs = Knobs::parse("fuserope,band=512").unwrap();
+        let t = 10_000.0;
+        let (k, band_from) = rope_kernels(&knobs, false, |band| SplitRope::new(2, 8, Dtype::Float16, t, t, 4, band));
+        assert!(k.is_some_and(|k| k.band_checked()) && band_from == Some(512));
+        let (k, band_from) = rope_kernels(&knobs, false, |band| SplitRope::with_wrong_band(2, 8, Dtype::Float16, t, t, 4, band));
+        assert!(k.is_some_and(|k| !k.band_checked()) && band_from.is_none());
+        let (k, band_from) = rope_kernels(&knobs, false, |_| Err(Error::Backend("fuserope self-check: the plain launch differs".into())));
+        assert!(k.is_none() && band_from.is_none());
+        let (k, band_from) = rope_kernels(&knobs, true, |_| panic!("a CPU load builds no kernel"));
+        assert!(k.is_none() && band_from.is_none());
+        let bool_mask = Knobs::parse("fuserope,band=512,mask=bool").unwrap();
+        let (k, band_from) = rope_kernels(&bool_mask, false, |band| {
+            assert!(!band, "mask=bool needs no banded launches");
+            SplitRope::new(2, 8, Dtype::Float16, t, t, 4, band)
+        });
+        assert!(k.is_some() && band_from.is_none());
+    }
+
     #[test]
     fn knobs_default_off_and_parse() {
         let k = Knobs::from_spec(Some("")).unwrap();
@@ -1560,6 +1754,11 @@ mod tests {
         let k = Knobs::from_spec(Some("headprune=0,unpad=0,fuserope=0")).unwrap();
         assert!(!k.headprune && !k.unpad && !k.fuserope);
         assert!(Knobs::from_spec(Some("fuserope=1")).unwrap().fuserope);
+        assert_eq!(k.band, 0);
+        assert_eq!(Knobs::from_spec(Some("band=512")).unwrap().band, 512);
+        assert_eq!(Knobs::from_spec(Some("band=512,band=0")).unwrap().band, 0);
+        assert!(Knobs::from_spec(Some("band")).is_err());
+        assert!(Knobs::from_spec(Some("band=-1")).is_err());
     }
 
     /// The padding rows of a batch go through the packing as their row's token 0, and every

@@ -1,24 +1,27 @@
 //! Equivalence of the work-reduction settings (`dense_upto=1024`, `headprune`, `unpad`, the
-//! three together, and `fuserope` alone and with the three), and of boolean masks (`mask=bool`),
-//! with the plain path, on the real checkpoints (ignored by default; needs them in the HF
-//! cache, `source bench/env.sh` first).
-//! Every checkpoint found is run, a missing one is skipped with a note. Pass criteria per
+//! three together, and `fuserope` alone and with the three), of boolean masks (`mask=bool`),
+//! and of the round 3 settings (`band`), on the real checkpoints (ignored by default; needs
+//! them in the HF cache, `source bench/env.sh` first).
+//! Every checkpoint found is run, a missing one is skipped with a note (with
+//! `SYS1_TEST_ALL_CHECKPOINTS=1`, a missing one fails the test). Pass criteria per
 //! question: the same chosen answer (argmax choice, rounded score, noul side) and every
-//! reported probability within 1e-3; `fuserope` alone must be exact (the same answer JSON for
-//! every state, equal raw logits and pooled outputs).
+//! reported probability within 1e-3. The exact settings (`fuserope` against the plain path,
+//! `band` against the plain path and against the round 2 default) must give the same answer
+//! JSON for every state and raw logits and pooled outputs equal bit for bit (`f32::to_bits`).
 //!
 //! The cases are the `bench/workloads/smoke.jsonl` requests plus built edge cases: one question
 //! with 2 options and with 1 option, 20 options, a state past `max_len` (truncated), two states
 //! of very different lengths in one request (heavy padding), the three answer types in one
 //! request (padded marker slots), and a single question (no padding, so `unpad` is skipped).
+//! Per checkpoint, states sized for its tokenizer add the lengths around `band=512`: one row of
+//! 511, 512 and 513 tokens, and two rows padded to 512 and to 600 (see [`length_cases`]).
 //!
 //! Run from the repo root with:
 //! `cargo test --manifest-path runtime/Cargo.toml -p laya-mlx --release --test settings -- --ignored --nocapture`
 
 mod common;
 
-use common::{bench_root, categorical, prob_diff, read_jsonl, CHECKPOINTS};
-use laya_core::resolve::resolve_model_dir;
+use common::{assert_ran, bench_root, categorical, checkpoint_dir, prob_diff, read_jsonl, CHECKPOINTS};
 use laya_core::{parse_questions, Agent, BackendOptions};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -27,6 +30,9 @@ use std::sync::Mutex;
 /// The settings the work reductions are measured against (`results/SPEED.md`). Their answers
 /// against the upstream fp32 reference are checked in `tests/reference.rs`.
 const BASE: &str = "f16gelu,cache=512,wired=2048";
+/// What sys1d's round 2 default adds to `BASE`: `BASE` plus this is the default the round 3
+/// settings are checked against, bit for bit.
+const DEFAULT_ON: &str = "dense_upto=1024,headprune,unpad,fuserope";
 const TOL: f64 = 1e-3;
 /// Against the fp32 CPU reference of `bench/reference/<name>/smoke.jsonl`: the f16 GPU
 /// tolerance of `tests/parity.rs`. typed-decisions measures 0.0008, multilingual 0.0102 on
@@ -37,6 +43,7 @@ const REFERENCE_TOL: f64 = 0.02;
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 /// One request: the states (each against every question) and the questions object.
+#[derive(Clone)]
 struct Case {
     name: String,
     states: Vec<Value>,
@@ -193,22 +200,102 @@ fn check_shapes(agent: &Agent, cases: &[Case]) {
     assert_eq!(batch_of("one_option").kmax, 1);
 }
 
+/// The padded length of the batch that `states` against `questions` makes on this agent.
+fn batch_len(agent: &Agent, states: &[Value], questions: &Value) -> usize {
+    let qs = parse_questions(questions).unwrap();
+    let mut items = Vec::new();
+    for st in states {
+        items.extend(agent.encode(st, &qs).unwrap());
+    }
+    agent.collate(&items).len
+}
+
+/// A state that makes a batch of exactly `target` tokens with `questions` on this agent's
+/// tokenizer: the longest run of [`words`] that fits, then single periods. `None` when
+/// `target` is past the checkpoint's `max_len`.
+fn state_of_len(agent: &Agent, questions: &Value, target: usize) -> Option<Value> {
+    if target > agent.cfg.agent.max_len {
+        return None;
+    }
+    let len_of = |text: &str| batch_len(agent, &[Value::String(text.to_string())], questions);
+    // Every word adds at least one token, so `target` words are too many (or truncated to
+    // `max_len`, which is then `target`).
+    let (mut lo, mut hi) = (0, target);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if len_of(&words(mid)) <= target {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    let mut text = words(lo);
+    while len_of(&text) < target {
+        text.push_str(" .");
+    }
+    assert_eq!(len_of(&text), target, "no state of {target} tokens: one more period overshoots");
+    Some(Value::String(text))
+}
+
+/// Cases at the lengths around `band=512`, sized for this checkpoint's tokenizer: one row of
+/// 511, 512 and 513 tokens (the one-row layout of the banded path from 512 up), and two rows
+/// padded to 512 and to 600 (the multi-row layout, packed with `unpad`; 600 is not a multiple
+/// of the 64-position chunk). A length past the checkpoint's `max_len` is skipped (english
+/// has 512).
+fn length_cases(agent: &Agent) -> Vec<Case> {
+    let one = json!({"q": {"type": "noul", "instructions": "Is the account locked?"}});
+    let two = json!({"q": choice("Is this about billing or delivery?", &["billing", "delivery"])});
+    let mut v = Vec::new();
+    for target in [511, 512, 513] {
+        if let Some(st) = state_of_len(agent, &one, target) {
+            v.push(Case { name: format!("len_{target}"), states: vec![st], questions: one.clone() });
+        }
+    }
+    for (target, other) in [(512, 200), (600, 333)] {
+        if let (Some(a), Some(b)) = (state_of_len(agent, &two, target), state_of_len(agent, &two, other)) {
+            v.push(Case { name: format!("rows_{target}_{other}"), states: vec![a, b], questions: two.clone() });
+        }
+    }
+    for c in &v {
+        let want: usize = c.name.split('_').nth(1).unwrap().parse().unwrap();
+        assert_eq!(batch_len(agent, &c.states, &c.questions), want, "{}", c.name);
+    }
+    v
+}
+
+/// The kernel names `Backend::active_kernels` reports for the kernel settings of `spec`.
+fn kernel_settings(spec: &str) -> Vec<&'static str> {
+    spec.split(',')
+        .filter_map(|s| match s {
+            "fuserope" | "fuserope=1" => Some("fuserope"),
+            s if s.starts_with("band=") && s != "band=0" => Some("band"),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Load the base agent and the agent with `extra` on top, run both over the cases and compare.
 /// Returns the max probability diff seen, after asserting every criterion.
-/// `extra` on top of the base settings against the base settings alone. With `exact`, every
-/// state's answers must serialise to the same JSON and the raw logits and pooled outputs must
-/// be equal; otherwise the same choices and probabilities within `TOL`.
-fn compare(name: &str, dir: &Path, cases: &[Case], extra: &str, exact: bool) -> f64 {
-    let base_agent = load(dir, BASE);
-    let tuned_agent = load(dir, &format!("{BASE},{extra}"));
+/// The base settings are `BASE` plus `on` (`""`: `BASE` alone). With `exact`, every state's
+/// answers must serialise to the same JSON and the raw logits and pooled outputs must be equal
+/// bit for bit; otherwise the same choices and probabilities within `TOL`.
+fn compare(name: &str, dir: &Path, cases: &[Case], on: &str, extra: &str, exact: bool) -> f64 {
+    let base = if on.is_empty() { BASE.to_string() } else { format!("{BASE},{on}") };
+    let base_agent = load(dir, &base);
+    let tuned_agent = load(dir, &format!("{base},{extra}"));
+    let label = if on.is_empty() { extra.to_string() } else { format!("{on} + {extra}") };
     // A kernel setting that fell back at load runs the same MLX ops as the base agent, and a
     // comparison would pass without touching the kernel. Refuse that run.
-    assert!(base_agent.backend().active_kernels().is_empty(), "{name}: the base settings `{BASE}` have a kernel active");
-    for setting in extra.split(',').filter(|s| *s == "fuserope") {
-        assert!(
-            tuned_agent.backend().active_kernels().contains(&setting),
-            "{name}/{extra}: `{setting}` is not active on the tuned agent: it fell back to the MLX split and rope ops at load (laya-mlx printed why on stderr), so this run would not test the fused path"
-        );
+    if on.is_empty() {
+        assert!(base_agent.backend().active_kernels().is_empty(), "{name}: the base settings `{BASE}` have a kernel active");
+    }
+    for (agent, which, spec) in [(&base_agent, "base", on), (&tuned_agent, "tuned", &format!("{on},{extra}")[..])] {
+        for setting in kernel_settings(spec) {
+            assert!(
+                agent.backend().active_kernels().contains(&setting),
+                "{name}/{label}: `{setting}` is not active on the {which} agent: it fell back to the MLX ops at load (laya-mlx printed why on stderr), so this run would not test it"
+            );
+        }
     }
     let base = run(&base_agent, cases);
     let tuned = run(&tuned_agent, cases);
@@ -226,15 +313,15 @@ fn compare(name: &str, dir: &Path, cases: &[Case], extra: &str, exact: bool) -> 
             if same_json {
                 exact_states += 1;
             }
-            assert!(same_json || !exact, "{name}/{}/{extra}: answers differ: {a} vs {b}", c.name);
+            assert!(same_json || !exact, "{name}/{}/{label}: answers differ: {a} vs {b}", c.name);
             let (qa, qb) = (a.as_object().unwrap(), b.as_object().unwrap());
-            assert_eq!(qa.len(), qb.len(), "{name}/{}/{extra}", c.name);
+            assert_eq!(qa.len(), qb.len(), "{name}/{}/{label}", c.name);
             for (qid, ans) in qa {
                 let other = &qb[qid];
-                assert_eq!(categorical(ans), categorical(other), "{name}/{}/{qid}/{extra}: {ans} vs {other}", c.name);
+                assert_eq!(categorical(ans), categorical(other), "{name}/{}/{qid}/{label}: {ans} vs {other}", c.name);
                 // Same probability keys, all finite, or `prob_diff` says which one is not.
-                let d = prob_diff(ans, other).unwrap_or_else(|e| panic!("{name}/{}/{qid}/{extra}: {e}: {ans} vs {other}", c.name));
-                assert!(d <= TOL, "{name}/{}/{qid}/{extra}: probability diff {d}: {ans} vs {other}", c.name);
+                let d = prob_diff(ans, other).unwrap_or_else(|e| panic!("{name}/{}/{qid}/{label}: {e}: {ans} vs {other}", c.name));
+                assert!(d <= TOL, "{name}/{}/{qid}/{label}: probability diff {d}: {ans} vs {other}", c.name);
                 // `answer_confidence` comes from the logits, `act_probability` from pooled.
                 for key in [&["answer_confidence"][..], &["action", "act_probability"]] {
                     let (mut x, mut y) = (ans, other);
@@ -242,10 +329,10 @@ fn compare(name: &str, dir: &Path, cases: &[Case], extra: &str, exact: bool) -> 
                         (x, y) = (&x[k], &y[k]);
                     }
                     let (Some(x), Some(y)) = (x.as_f64().filter(|v| v.is_finite()), y.as_f64().filter(|v| v.is_finite())) else {
-                        panic!("{name}/{}/{qid}/{extra}: {} is not a finite number on both sides: {x} vs {y}", c.name, key.join("."));
+                        panic!("{name}/{}/{qid}/{label}: {} is not a finite number on both sides: {x} vs {y}", c.name, key.join("."));
                     };
                     let dc = (x - y).abs();
-                    assert!(dc <= TOL, "{name}/{}/{qid}/{extra}: {} diff {dc}", c.name, key.join("."));
+                    assert!(dc <= TOL, "{name}/{}/{qid}/{label}: {} diff {dc}", c.name, key.join("."));
                     worst = worst.max(dc);
                 }
                 worst = worst.max(d);
@@ -255,11 +342,18 @@ fn compare(name: &str, dir: &Path, cases: &[Case], extra: &str, exact: bool) -> 
     }
     let states: usize = base.answers.iter().map(Vec::len).sum();
     if exact {
-        assert_eq!(exact_states, states, "{name}/{extra}: not every state is byte-identical");
-        assert_eq!((worst_logit, worst_pooled), (0.0, 0.0), "{name}/{extra}: raw logits or pooled outputs differ");
+        assert_eq!(exact_states, states, "{name}/{label}: not every state is byte-identical");
+        assert_eq!((worst_logit, worst_pooled), (0.0, 0.0), "{name}/{label}: raw logits or pooled outputs differ");
+        // Bit for bit, so a sign of zero or a NaN payload counts too.
+        for (i, c) in cases.iter().enumerate() {
+            for (what, a, b) in [("logits", &base.logits[i], &tuned.logits[i]), ("pooled", &base.pooled[i], &tuned.pooled[i])] {
+                let same = a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits());
+                assert!(same, "{name}/{}/{label}: raw {what} differ in their bits", c.name);
+            }
+        }
     }
     eprintln!(
-        "{name:<16} {extra:<32} {answers} answers over {} cases: max prob diff {worst:.2e}, {exact_states}/{states} states byte-identical, raw logits {worst_logit:.2e}, pooled {worst_pooled:.2e} (one f16 ulp at its max |x| {pooled_scale:.0} is {pooled_ulp})",
+        "{name:<16} {label:<40} {answers} answers over {} cases: max prob diff {worst:.2e}, {exact_states}/{states} states byte-identical, raw logits {worst_logit:.2e}, pooled {worst_pooled:.2e} (one f16 ulp at its max |x| {pooled_scale:.0} is {pooled_ulp})",
         cases.len()
     );
     worst
@@ -268,20 +362,29 @@ fn compare(name: &str, dir: &Path, cases: &[Case], extra: &str, exact: bool) -> 
 /// Run `extra` against the base settings on every checkpoint in the cache; `exact` as in
 /// [`compare`].
 fn every_checkpoint(extra: &str, exact: bool) {
+    every_checkpoint_on("", extra, exact);
+}
+
+/// [`every_checkpoint`] against `BASE` plus `on` (`""`: `BASE` alone), with the
+/// [`length_cases`] of each checkpoint added to the shared cases.
+fn every_checkpoint_on(on: &str, extra: &str, exact: bool) {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let smoke = read_jsonl(&bench_root().join("workloads/smoke.jsonl"));
-    let cases = cases(&smoke);
+    let shared = cases(&smoke);
     let mut ran = 0;
     for (name, repo) in CHECKPOINTS {
-        let Ok(dir) = resolve_model_dir(repo, None) else {
-            eprintln!("{name:<16} skipped: {repo} is not in the HF cache");
+        let Some(dir) = checkpoint_dir(name, repo) else {
             continue;
         };
-        check_shapes(&load(&dir, BASE), &cases);
-        compare(name, &dir, &cases, extra, exact);
+        let plain = load(&dir, BASE);
+        check_shapes(&plain, &shared);
+        let mut cases = shared.clone();
+        cases.extend(length_cases(&plain));
+        drop(plain);
+        compare(name, &dir, &cases, on, extra, exact);
         ran += 1;
     }
-    assert!(ran > 0, "no checkpoint in the HF cache; source bench/env.sh and download one");
+    assert_ran(ran);
 }
 
 #[test]
@@ -327,7 +430,29 @@ fn fuserope_matches_plain() {
 #[test]
 #[ignore]
 fn all_four_match_plain() {
-    every_checkpoint("dense_upto=1024,headprune,unpad,fuserope", false);
+    every_checkpoint(DEFAULT_ON, false);
+}
+
+/// The banded local attention (`band`, round 3) against the plain path, exactly: from the
+/// shortest length up (`band=1`, every case takes it) and from 512 up (`band=512`, the
+/// shipped threshold: `len_511` and the smoke cases take the dense path, `len_512` and up the
+/// banded one). The banded layout gives every query the keys the dense window mask leaves
+/// it, in the same 32-key blocks, and the blocks it adds are fully masked.
+#[test]
+#[ignore]
+fn band_matches_plain() {
+    every_checkpoint("fuserope,band=1", true);
+    every_checkpoint("fuserope,band=512", true);
+}
+
+/// `band` on top of the round 2 default, exactly: the packed layout (`unpad`), where the
+/// banded output is compacted through its own index, and the chunked path above
+/// `dense_upto=1024`, which `band` replaces.
+#[test]
+#[ignore]
+fn band_with_the_default_matches_the_default() {
+    every_checkpoint_on(DEFAULT_ON, "band=1", true);
+    every_checkpoint_on(DEFAULT_ON, "band=512", true);
 }
 
 /// Boolean masks on every path: `over_max_len` and `heavy_padding` pad past `4 * window`, so
@@ -353,8 +478,7 @@ fn smoke_matches_reference_with_all_three() {
     let extra = "dense_upto=1024,headprune,unpad";
     let mut ran = 0;
     for (name, repo) in CHECKPOINTS {
-        let Ok(dir) = resolve_model_dir(repo, None) else {
-            eprintln!("{name:<16} skipped: {repo} is not in the HF cache");
+        let Some(dir) = checkpoint_dir(name, repo) else {
             continue;
         };
         let reference = read_jsonl(&bench.join(format!("reference/{name}/smoke.jsonl")));
@@ -381,5 +505,5 @@ fn smoke_matches_reference_with_all_three() {
         assert!(pct >= 99.0, "{name}/{extra}: agreement {pct:.1}% < 99%");
         ran += 1;
     }
-    assert!(ran > 0, "no checkpoint in the HF cache");
+    assert_ran(ran);
 }

@@ -5,15 +5,15 @@
 //! `action.act_probability` included.
 //!
 //! Ignored by default: it needs the downloaded checkpoints (`source bench/env.sh` first). A
-//! checkpoint that is not in the cache is skipped with a note; at least one must run.
+//! checkpoint that is not in the cache is skipped with a note; at least one must run, and with
+//! `SYS1_TEST_ALL_CHECKPOINTS=1` all three.
 //!
 //! Run from the repo root with:
 //! `cargo test --manifest-path runtime/Cargo.toml -p laya-mlx --release --test reference -- --ignored --nocapture`
 
 mod common;
 
-use common::{agree, bench_root, categorical, prob_diff, read_jsonl, CHECKPOINTS};
-use laya_core::resolve::resolve_model_dir;
+use common::{agree, assert_ran, bench_root, categorical, checkpoint_dir, prob_diff, read_jsonl, CHECKPOINTS};
 use laya_core::{Agent, BackendOptions};
 use serde_json::{json, Value};
 
@@ -49,8 +49,7 @@ fn smoke_against_reference(tuning: &str) {
     let smoke = read_jsonl(&bench.join("workloads/smoke.jsonl"));
     let mut ran = 0;
     for (name, repo) in CHECKPOINTS {
-        let Ok(dir) = resolve_model_dir(repo, None) else {
-            eprintln!("{name:<16} skipped: {repo} is not in the HF cache");
+        let Some(dir) = checkpoint_dir(name, repo) else {
             continue;
         };
         let reference = read_jsonl(&bench.join(format!("reference/{name}/smoke.jsonl")));
@@ -89,7 +88,7 @@ fn smoke_against_reference(tuning: &str) {
         assert!(agreement >= MIN_AGREEMENT, "{name}: agreement {:.1}% is below {:.0}%", 100.0 * agreement, 100.0 * MIN_AGREEMENT);
         ran += 1;
     }
-    assert!(ran > 0, "no checkpoint in the HF cache; source bench/env.sh and download one");
+    assert_ran(ran);
 }
 
 #[test]

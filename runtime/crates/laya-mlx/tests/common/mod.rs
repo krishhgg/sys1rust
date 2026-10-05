@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use laya_core::resolve::resolve_model_dir;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,37 @@ pub const CHECKPOINTS: [(&str, &str); 3] = [
     ("multilingual", "convaiinnovations/laya-multilingual"),
     ("english", "convaiinnovations/laya"),
 ];
+
+/// Set to `1` for the strict mode of the model tests: a checkpoint that does not resolve fails
+/// the test instead of being skipped, and every test must run all of [`CHECKPOINTS`]. Use it
+/// for the runs that back a release.
+pub const ALL_CHECKPOINTS_ENV: &str = "SYS1_TEST_ALL_CHECKPOINTS";
+
+fn strict() -> bool {
+    std::env::var_os(ALL_CHECKPOINTS_ENV).is_some_and(|v| v == "1")
+}
+
+/// The cached directory of checkpoint `repo`, or `None` with a note when it does not resolve.
+/// In strict mode ([`ALL_CHECKPOINTS_ENV`]) that is a panic naming the error.
+pub fn checkpoint_dir(name: &str, repo: &str) -> Option<PathBuf> {
+    match resolve_model_dir(repo, None) {
+        Ok(dir) => Some(dir),
+        Err(e) if strict() => panic!("{name}: {repo} does not resolve ({e}); {ALL_CHECKPOINTS_ENV}=1 needs every checkpoint"),
+        Err(e) => {
+            eprintln!("{name:<16} skipped: {repo} does not resolve ({e})");
+            None
+        }
+    }
+}
+
+/// The end of a test over [`CHECKPOINTS`]: `ran` of them ran. At least one must, and in strict
+/// mode all of them.
+pub fn assert_ran(ran: usize) {
+    assert!(ran > 0, "no checkpoint in the HF cache; source bench/env.sh and download one");
+    if strict() {
+        assert_eq!(ran, CHECKPOINTS.len(), "{ALL_CHECKPOINTS_ENV}=1: {ran} of {} checkpoints ran", CHECKPOINTS.len());
+    }
+}
 
 /// `bench/` of this checkout.
 pub fn bench_root() -> PathBuf {
