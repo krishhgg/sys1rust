@@ -1,11 +1,12 @@
 //! The downloader against local HTTP servers: the cache layout it writes, hash checks,
-//! resuming, retries, where HF_TOKEN goes, and locking. No network access.
+//! resuming, retries, where HF_TOKEN goes, snapshot links, and locking. No network access.
 
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,6 +26,11 @@ struct Route {
     cuts: VecDeque<usize>,
     /// The next request gets this status and an empty body.
     fail_next: Option<u16>,
+    /// Every request gets this status and an empty body.
+    fail_always: Option<u16>,
+    /// The next response is a 206 for the bytes from this offset, whatever the request asked
+    /// for.
+    stray_range: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +110,7 @@ fn handle(mut conn: TcpStream, routes: &Mutex<HashMap<String, Route>>, seen: &Mu
     let Some(route) = routes.get_mut(&path) else {
         return respond(&mut conn, 404, &[], b"");
     };
-    if let Some(code) = route.fail_next.take() {
+    if let Some(code) = route.fail_next.take().or(route.fail_always) {
         return respond(&mut conn, code, &[], b"");
     }
     if let Some(to) = &route.redirect {
@@ -112,11 +118,13 @@ fn handle(mut conn: TcpStream, routes: &Mutex<HashMap<String, Route>>, seen: &Mu
     }
     let cut = route.cuts.pop_front();
     let body = route.body.clone();
-    let start = range
-        .as_deref()
-        .and_then(|r| r.strip_prefix("bytes="))
-        .and_then(|r| r.strip_suffix('-'))
-        .and_then(|n| n.parse::<usize>().ok());
+    let start = route.stray_range.take().or_else(|| {
+        range
+            .as_deref()
+            .and_then(|r| r.strip_prefix("bytes="))
+            .and_then(|r| r.strip_suffix('-'))
+            .and_then(|n| n.parse::<usize>().ok())
+    });
     if let (Some(start), false) = (start, route.ignore_range) {
         let cr = format!("bytes {}-{}/{}", start, body.len() - 1, body.len());
         return respond_cut(
@@ -415,6 +423,60 @@ fn a_503_is_retried_and_a_404_is_not() {
 }
 
 #[test]
+fn a_partial_file_from_an_earlier_run_does_not_count_as_progress() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    hub.route(
+        &url_path(m, 0),
+        Route {
+            body: weights.clone(),
+            fail_always: Some(503),
+            ..Default::default()
+        },
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    let blob = m.blob_path(c, &m.files[0]);
+    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+    std::fs::write(incomplete_path(&blob), &weights[..1000]).unwrap();
+    let e = client(&hub).ensure(c, m, &mut quiet()).unwrap_err();
+    assert!(format!("{e:#}").contains("HTTP 503"), "{e:#}");
+    // The first try and 3 retries, each one resuming from byte 1000.
+    let seen = hub.requests_for(&url_path(m, 0));
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert!(
+        seen.iter()
+            .all(|s| s.range.as_deref() == Some("bytes=1000-")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_range_nobody_asked_for_restarts_a_fresh_download() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    hub.route(
+        &url_path(m, 0),
+        Route {
+            body: weights.clone(),
+            stray_range: Some(1000),
+            ..Default::default()
+        },
+    );
+    let cache = tempfile::tempdir().unwrap();
+    let snap = client(&hub).ensure(cache.path(), m, &mut quiet()).unwrap();
+    let seen = hub.requests_for(&url_path(m, 0));
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen.iter().all(|s| s.range.is_none()), "{seen:?}");
+    assert_eq!(
+        std::fs::read(snap.join("model.safetensors")).unwrap(),
+        weights
+    );
+}
+
+#[test]
 fn hf_token_goes_to_the_endpoint_but_not_the_redirect_host() {
     let (m, weights, tokenizer) = tiny_model();
     let hub = FakeHub::start("127.0.0.1:0");
@@ -453,6 +515,43 @@ fn hf_token_goes_to_the_endpoint_but_not_the_redirect_host() {
 }
 
 #[test]
+fn hf_token_does_not_follow_a_redirect_to_another_port_on_the_same_host() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    let other = FakeHub::start("127.0.0.1:0");
+    assert_ne!(hub.base, other.base);
+    serve_model(&hub, m, &weights, &tokenizer);
+    other.route(
+        "/other/weights",
+        Route {
+            body: weights.clone(),
+            ..Default::default()
+        },
+    );
+    hub.route(
+        &url_path(m, 0),
+        Route {
+            redirect: Some(format!("{}/other/weights", other.base)),
+            ..Default::default()
+        },
+    );
+    let cache = tempfile::tempdir().unwrap();
+    Hub::new(&hub.base, Some("hf_test".into()))
+        .with_backoff(Duration::ZERO)
+        .ensure(cache.path(), m, &mut quiet())
+        .unwrap();
+    let first = &hub.requests_for(&url_path(m, 0))[0];
+    assert_eq!(first.auth.as_deref(), Some("Bearer hf_test"));
+    let redirected = other.seen();
+    assert_eq!(redirected.len(), 1, "{redirected:?}");
+    assert!(
+        redirected[0].host.starts_with("127.0.0.1:"),
+        "{redirected:?}"
+    );
+    assert_eq!(redirected[0].auth, None);
+}
+
+#[test]
 fn a_complete_snapshot_costs_no_request_and_a_lost_link_comes_back_from_the_blob() {
     let (m, weights, tokenizer) = tiny_model();
     let hub = FakeHub::start("127.0.0.1:0");
@@ -468,6 +567,56 @@ fn a_complete_snapshot_costs_no_request_and_a_lost_link_comes_back_from_the_blob
     client(&hub).ensure(c, m, &mut quiet()).unwrap();
     assert_eq!(hub.seen().len(), n);
     assert_eq!(std::fs::read(&link).unwrap(), tokenizer);
+}
+
+#[test]
+fn a_link_to_the_right_blob_stays_as_it_is() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    // Another process made the right link, but the blob is not there yet, so this download
+    // fetches the blob and then finds the link in place.
+    let link = m.snapshot_dir(c).join("model.safetensors");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(Path::new("../../blobs").join(m.files[0].blob), &link).unwrap();
+    let inode = std::fs::symlink_metadata(&link).unwrap().ino();
+    client(&hub).ensure(c, m, &mut quiet()).unwrap();
+    assert_eq!(hub.requests_for(&url_path(m, 0)).len(), 1);
+    assert_eq!(std::fs::symlink_metadata(&link).unwrap().ino(), inode);
+    assert_eq!(std::fs::read(&link).unwrap(), weights);
+}
+
+#[test]
+fn a_stale_link_is_replaced() {
+    let (m, weights, tokenizer) = tiny_model();
+    let hub = FakeHub::start("127.0.0.1:0");
+    serve_model(&hub, m, &weights, &tokenizer);
+    let cache = tempfile::tempdir().unwrap();
+    let c = cache.path();
+    let snap = m.snapshot_dir(c);
+    // A link whose blob a user deleted.
+    let link = snap.join("tokenizer/tokenizer.json");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("../../../blobs/gone", &link).unwrap();
+    client(&hub).ensure(c, m, &mut quiet()).unwrap();
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        Path::new("../../../blobs").join(m.files[1].blob)
+    );
+    assert_eq!(std::fs::read(&link).unwrap(), tokenizer);
+    // No temporary link stays behind.
+    let names = |dir: &Path| {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(names(&snap), ["model.safetensors", "tokenizer"]);
+    assert_eq!(names(&snap.join("tokenizer")), ["tokenizer.json"]);
 }
 
 #[test]

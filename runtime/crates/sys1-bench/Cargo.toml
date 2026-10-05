@@ -3,6 +3,7 @@ name = "sys1-bench"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Bench adapter (bench/PLAN.md, Adapter interface) for the sys1rust runtime."
 
 [[bin]]

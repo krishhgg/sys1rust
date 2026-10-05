@@ -21,7 +21,7 @@
 
 ## Build
 
-There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.85 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python is only used to fetch MLX and the model. `sys1rust` doesn't run it.
+There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python is only used to fetch MLX and the model. `sys1rust` doesn't run it.
 
 ```sh
 # A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files),

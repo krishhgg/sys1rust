@@ -9,9 +9,11 @@ use crate::models::{file_size, incomplete_path, mb, repo_folder, LayaModel, Mode
 use anyhow::{anyhow, bail, Context, Result};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use ureq::config::RedirectAuthHeaders;
 use ureq::tls::{RootCerts, TlsConfig};
@@ -62,12 +64,15 @@ impl Hub {
                     .build(),
             )
             .http_status_as_error(false)
-            // HF_TOKEN goes to the endpoint, never to the CDN host a large file redirects to.
-            .redirect_auth_headers(RedirectAuthHeaders::SameHost)
+            // ureq drops HF_TOKEN on every redirect, because `SameHost` would keep it for another
+            // port. The hub sends a large file to a CDN host whose signed URL needs no token.
+            .redirect_auth_headers(RedirectAuthHeaders::Never)
             // Ranges and sizes count the file's bytes, so no compressed transfer.
             .accept_encoding("identity")
             .user_agent(concat!("sys1rust/", env!("CARGO_PKG_VERSION")))
+            .timeout_resolve(Some(Duration::from_secs(30)))
             .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_send_request(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(60)))
             .timeout_recv_body(Some(BODY_BUDGET))
             .build()
@@ -125,28 +130,27 @@ impl Hub {
             return Ok(());
         }
         let blob = model.blob_path(cache, file);
+        let lock_path = cache
+            .join(".locks")
+            .join(repo_folder(model.repo))
+            .join(format!("{}.lock", file.blob));
+        create_parent(&lock_path)?;
+        create_parent(&blob)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("open {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("lock {}", lock_path.display()))?;
+        // Another process may have finished this blob while this one waited.
         if file_size(&blob) != Some(file.size) {
-            let lock_path = cache
-                .join(".locks")
-                .join(repo_folder(model.repo))
-                .join(format!("{}.lock", file.blob));
-            create_parent(&lock_path)?;
-            create_parent(&blob)?;
-            let lock = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&lock_path)
-                .with_context(|| format!("open {}", lock_path.display()))?;
-            lock.lock()
-                .with_context(|| format!("lock {}", lock_path.display()))?;
-            // Another process may have finished this blob while this one waited.
-            if file_size(&blob) != Some(file.size) {
-                self.download_blob(model, file, &blob, progress)?;
-            }
-            // `lock` drops here, which unlocks.
+            self.download_blob(model, file, &blob, progress)?;
         }
+        // The lock also covers the link, so 2 downloaders never replace each other's link.
         link_into_snapshot(&link, file)
+        // `lock` drops here, which unlocks.
     }
 
     fn download_blob<W: Write>(
@@ -160,9 +164,9 @@ impl Hub {
         let url = self.file_url(model, file);
         let mut attempt = 1;
         // A GET counts as progress only when it takes `part` past the most bytes it has held
-        // in this call. A server that ignores `Range` restarts the file on every GET, and
-        // this way it still runs out of attempts.
-        let mut furthest = 0;
+        // in this call, starting from what an earlier run left. A server that ignores `Range`
+        // restarts the file on every GET, and this way it still runs out of attempts.
+        let mut furthest = file_size(&part).filter(|&n| n <= file.size).unwrap_or(0);
         loop {
             match self.fetch(&url, &part, file, progress) {
                 Ok(()) => break,
@@ -229,7 +233,12 @@ impl Hub {
             206 if have > 0 && content_range_start(&resp) == Some(have) => true,
             206 => {
                 // The server sent a range this request did not ask for, so start the file over.
-                fs::remove_file(part).map_err(fatal)?;
+                // A fresh download has no `part` yet.
+                match fs::remove_file(part) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(fatal(e)),
+                }
                 return Err(Failure::Retry(anyhow!("unexpected Content-Range from {url}")));
             }
             429 | 500..=599 => return Err(Failure::Retry(anyhow!("HTTP {status} from {url}"))),
@@ -303,7 +312,7 @@ fn content_range_start(resp: &ureq::http::Response<ureq::Body>) -> Option<u64> {
 }
 
 /// `snapshots/<rev>/<path>` -> `../../blobs/<blob>`, with one more `..` per folder in `path`:
-/// the relative link huggingface_hub makes.
+/// the relative link huggingface_hub makes. The caller holds the blob's lock.
 fn link_into_snapshot(link: &Path, file: &ModelFile) -> Result<()> {
     create_parent(link)?;
     let mut target = PathBuf::new();
@@ -312,23 +321,32 @@ fn link_into_snapshot(link: &Path, file: &ModelFile) -> Result<()> {
     }
     target.push("blobs");
     target.push(file.blob);
-    // Replace what is there, such as a link whose blob a user deleted. Another process may
-    // have removed it first.
-    match fs::remove_file(link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(anyhow!(e).context(format!("replace {}", link.display()))),
+    // Another downloader may have made this link already, and a reader may be using it.
+    if fs::read_link(link).is_ok_and(|t| t == target) && file_size(link) == Some(file.size) {
+        return Ok(());
     }
-    match std::os::unix::fs::symlink(&target, link) {
-        Ok(()) => Ok(()),
-        // Another process made the same link between the remove and here.
-        Err(e)
-            if e.kind() == io::ErrorKind::AlreadyExists && file_size(link) == Some(file.size) =>
-        {
-            Ok(())
-        }
-        Err(e) => Err(anyhow!(e).context(format!("link {}", link.display()))),
-    }
+    // Make the link under a name no other process uses, then rename it over what is there,
+    // such as a link whose blob a user deleted. A rename replaces the old entry in 1 step, so
+    // `link` never goes missing.
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = link
+        .file_name()
+        .expect("a snapshot path ends in a file name");
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = link.with_file_name(tmp_name);
+    // Only a process with this one's ID, now gone, could have left a link at `tmp`.
+    let _ = fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(&target, &tmp).with_context(|| format!("link {}", tmp.display()))?;
+    fs::rename(&tmp, link).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        anyhow!(e).context(format!("rename {} to {}", tmp.display(), link.display()))
+    })
 }
 
 fn create_parent(path: &Path) -> Result<()> {

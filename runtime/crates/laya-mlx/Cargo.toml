@@ -3,6 +3,7 @@ name = "laya-mlx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "MLX (Apple silicon) backend for the Laya decision model."
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "sys1rust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 description = "Runs Laya System 1 models on Apple silicon GPUs and serves Laya's /v1/systemone protocol."
 
 [lib]
