@@ -1,0 +1,80 @@
+lib/ holds libmlx.dylib, libjaccl.dylib and mlx.metallib from the mlx-metal 0.32.2 wheel on
+PyPI, built from MLX 0.32.2 (https://github.com/ml-explore/mlx at
+1f8e74e3f12f31365464a6867c6579f0e9b29d85), Copyright 2023 Apple Inc., licensed under the MIT
+License (see licenses/MLX-LICENSE). MLX builds the third-party code below, or its own adaptations
+of it, into them. Each file in licenses/ names its source and commit at the top.
+
+  nlohmann/json 3.11.3, in libmlx.dylib and libjaccl.dylib. Copyright 2013-2022 Niels Lohmann,
+  MIT License, with parts by Björn Hoehrmann, Florian Loitsch and Evan Nemerson (MIT) and the
+  Abseil Authors (Apache License 2.0, see LICENSE). See licenses/nlohmann-json-3.11.3.txt.
+
+  gguflib from gguf-tools (https://github.com/antirez/gguf-tools), in libmlx.dylib.
+  Copyright 2022 Georgi Gerganov, MIT License. See licenses/gguf-tools-8fa6eb6.txt.
+
+  FP16 (https://github.com/Maratyszcza/FP16), the source of gguflib's fp16.c, in libmlx.dylib.
+  Copyright 2017 Facebook Inc., 2017 Georgia Institute of Technology and 2019 Google LLC,
+  MIT License. See licenses/fp16-ba1d31f.txt.
+
+  metal-cpp 26 (https://developer.apple.com/metal/cpp/), in libmlx.dylib. Copyright 2024 Apple
+  Inc., Apache License 2.0. See licenses/metal-cpp-26.txt.
+
+  PocketFFT, MLX's mlx/3rdparty/pocketfft.h, in libmlx.dylib. Copyright 2010-2022
+  Max-Planck-Society, 2019-2020 Peter Bell, and for the DCT-IV code 2003 and 2007-2014 Matteo
+  Frigo and the Massachusetts Institute of Technology, BSD 3-Clause License. See
+  licenses/pocketfft-mlx-0.32.2.txt.
+
+  SmallVector from V8, MLX's mlx/small_vector.h, in libmlx.dylib. Copyright 2018 the V8 project
+  authors, BSD 3-Clause License. See licenses/v8-small-vector-mlx-0.32.2.txt.
+
+  expm1f by Norbert Juffa, MLX's mlx/backend/metal/kernels/expm1f.h, in mlx.metallib and as
+  kernel source in libmlx.dylib. Copyright 2015-2023 Norbert Juffa, BSD 2-Clause License. See
+  licenses/expm1f-mlx-0.32.2.txt.
+
+  cexpf from NVIDIA Thrust, MLX's mlx/backend/metal/kernels/cexpf.h, in mlx.metallib and as
+  kernel source in libmlx.dylib. Copyright 2008-2013 NVIDIA Corporation and 2013 Filipe RNC Maia,
+  Apache License 2.0 (see LICENSE). See licenses/thrust-cexpf-mlx-0.32.2.txt.
+
+  erf and erfinv by njuffa (Norbert Juffa) on Stack Overflow, MLX's
+  mlx/backend/metal/kernels/erf.h and the erfinv in mlx/backend/cpu/simd/math.h, in mlx.metallib
+  and libmlx.dylib, which also keeps them as source. Creative Commons Attribution-ShareAlike 4.0
+  International License (CC BY-SA 4.0). MLX modified both. See
+  licenses/stackoverflow-erf-erfinv.txt.
+
+  PyTorch (https://github.com/pytorch/pytorch), the source of MLX's float to fp8 e4m3 conversion
+  in mlx/backend/metal/kernels/fp8.h and mlx/backend/cpu/unary_ops.h and of its CPU erf in
+  mlx/backend/cpu/simd/math.h, in mlx.metallib and libmlx.dylib, which also keeps them as source.
+  Copyright Facebook Inc. and the other holders it lists, BSD 3-Clause License. See
+  licenses/pytorch-e3643e1.txt.
+
+  NumpyFormat.hpp from supervised-lda (https://github.com/angeloskath/supervised-lda), the source
+  of MLX's .npy reader and writer in mlx/io/load.cpp, in libmlx.dylib. Copyright 2016 Angelos
+  Katharopoulos and Despoina Paschalidou, MIT License. See licenses/supervised-lda-fe3a39b.txt.
+
+  neon_mathfun.h by Julien Pommier, from simd_utils (https://github.com/JishinMaster/simd_utils),
+  the source of MLX's CPU sincos in mlx/backend/cpu/simd/math.h, in libmlx.dylib as object code
+  and as C++ source in its CPU JIT preamble. Copyright 2011 Julien Pommier, zlib License, and 2019
+  JishinMaster, BSD 2-Clause License. MLX modified it. See licenses/simd-utils-3c1433a.txt.
+
+  fastermath (https://github.com/akohlmey/fastermath), the source of MLX's CPU exp in
+  mlx/backend/cpu/simd/math.h, in libmlx.dylib as object code and as C++ source in its CPU JIT
+  preamble. Copyright 2012-2013 Axel Kohlmeyer, BSD 3-Clause License. See
+  licenses/fastermath-2ed806f.txt.
+
+  NumPy (https://github.com/numpy/numpy), whose einsum path search MLX translates in
+  mlx/einsum.cpp, in libmlx.dylib. Copyright 2005-2024 NumPy Developers, BSD 3-Clause License.
+  See licenses/numpy-1d49c7f.txt.
+
+  TensorFlow (https://github.com/tensorflow/tensorflow), whose CumulativeLogsumexp gradient MLX
+  translates in mlx/primitives.cpp, in libmlx.dylib. Copyright 2015 The TensorFlow Authors,
+  Apache License 2.0 (see LICENSE). See licenses/tensorflow-2a59109.txt.
+
+  JAX (https://github.com/jax-ml/jax), whose truncated_normal MLX translates in mlx/random.cpp,
+  in libmlx.dylib. Copyright 2018 The JAX Authors, Apache License 2.0 (see LICENSE). See
+  licenses/jax-5942e15.txt.
+
+lib/ also holds code that needs no notice here. fmt 12.1.0 is MIT with an exception for object
+code. ThreadPool (https://github.com/progschj/ThreadPool) is zlib, which asks for its notice in
+source copies only, and lib/ holds it as object code only. Cephes reaches MLX only through
+fastermath and Julien Pommier's code, and its terms ask for no notice. MLX also cites papers,
+documentation, math results and algorithms that it implements in code of its own, such as
+Threefry, CUB's merge sort, VkFFT's Stockham FFT and Neil Sloane's table of Hadamard matrices.

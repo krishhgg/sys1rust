@@ -1,0 +1,230 @@
+# On a v* tag, build both bundles, smoke-test them on macOS 15 and 26 runners, publish the
+# GitHub release and update Formula/sys1rust.rb in krishhgg/homebrew-tap. A vX.Y.Z-rcN tag
+# publishes a prerelease and leaves the tap alone. packaging/RELEASE.md is the checklist.
+# A pull request that changes packaging/ or this file runs the build and smoke jobs only.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - ".github/workflows/release.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Runs bash with -eo pipefail, so a failed command inside a pipe fails the step.
+    shell: bash
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the tag against the workspace version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # build.sh reads the version with the same sed, which matches only the
+          # [workspace.package] line. vX.Y.Z publishes that version and vX.Y.Z-rcN a prerelease of it.
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' runtime/Cargo.toml)
+          re='^v([0-9]+\.[0-9]+\.[0-9]+)(-rc[0-9]+)?$'
+          if ! [[ $GITHUB_REF_NAME =~ $re ]] || [ "${BASH_REMATCH[1]}" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the workspace version $version. Tag v$version or v$version-rcN."
+            exit 1
+          fi
+      - name: Install the pinned Rust
+        run: |
+          rust=$(cat packaging/rust-toolchain-version)
+          rustup toolchain install "$rust" --profile minimal
+          RUSTUP_TOOLCHAIN=$rust rustc --version
+          {
+            echo "RUSTUP_TOOLCHAIN=$rust"
+            echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+          } >> "$GITHUB_ENV"
+      - name: Cache the cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+          key: cargo-registry-${{ hashFiles('runtime/Cargo.lock') }}
+          restore-keys: cargo-registry-
+      - name: Build the macOS 26 bundle
+        run: packaging/build.sh macos26 dist
+      - name: Build the macOS 14 bundle
+        run: packaging/build.sh macos14 dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundles
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          # The tarballs are gzip files already.
+          compression-level: 0
+
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-15 runs the macOS 14 bundle on an OS older than 26.2, the case that bundle exists for.
+          - { runner: macos-15, flavor: macos14 }
+          - { runner: macos-26, flavor: macos26 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      FLAVOR: ${{ matrix.flavor }}
+      HF_HUB_CACHE: ${{ github.workspace }}/.hf-cache
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundles
+          path: dist
+      - name: Unpack and run through a symlink, as Homebrew does
+        run: |
+          mkdir -p "$RUNNER_TEMP/pkg" "$RUNNER_TEMP/bin"
+          tar -xzf dist/sys1rust-*-"$FLAVOR"-arm64.tar.gz -C "$RUNNER_TEMP/pkg"
+          ln -s "$RUNNER_TEMP"/pkg/sys1rust-*/bin/sys1rust "$RUNNER_TEMP/bin/sys1rust"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Version and model list
+        run: sw_vers && sys1rust --version && sys1rust models
+      - name: Cache the typed-decisions snapshot
+        uses: actions/cache@v6
+        with:
+          path: .hf-cache
+          # The typed-decisions revision in bench/models.lock.json, which sys1rust pins.
+          key: hf-typed-decisions-1a793eb568e6718f15941d08f85432581df534e3
+      - name: Pull typed-decisions
+        run: sys1rust pull typed-decisions
+      - name: Smoke test
+        run: python3 packaging/smoke.py "$(command -v sys1rust)"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Every tag's publish job joins this one group, so 2 tags never write the tap at the same
+    # time. GitHub runs 1 job of a group and holds 1 more. A third tag's job cancels the held
+    # one, and that tag's publish job then needs a rerun.
+    concurrency:
+      group: tap-update
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gh reads GH_TOKEN and the tap clone has its own helper, so git keeps no token here.
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: bundles
+          path: dist
+      - name: Checksums
+        run: cd dist && sha256sum sys1rust-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Clone the Homebrew tap and check that TAP_TOKEN can push to it
+        if: ${{ !contains(github.ref_name, '-rc') }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::The TAP_TOKEN secret is empty. Set it to a token that can write to krishhgg/homebrew-tap."
+            exit 1
+          fi
+          # Git asks this credential helper for the password, and the helper reads TAP_TOKEN from
+          # the environment. The token stays out of the clone URL, .git/config, every command line
+          # and the log. The empty helper first drops any helper the runner set up.
+          # shellcheck disable=SC2016
+          git clone --depth 1 -c credential.helper= \
+            -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$TAP_TOKEN"; }; f' \
+            https://github.com/krishhgg/homebrew-tap.git "$RUNNER_TEMP/tap"
+          # The tap is public, so the clone runs without the token. A dry-run push asks GitHub for
+          # git-receive-pack, the service behind every push, and GitHub serves it only to a token
+          # that it accepts and that has push access to the tap. An expired, revoked or read-only
+          # token therefore stops the job here, before the release exists. The dry run sends no
+          # commits, so it does not check branch rules on main. Unlike HEAD, --all also works on
+          # a tap with no commits.
+          git -C "$RUNNER_TEMP/tap" push --dry-run --all origin
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          # gh release create makes a draft, uploads the files and then publishes the draft, so a
+          # cancelled attempt can leave a draft behind, and gh release create would add a second
+          # one. The job stops on a draft of this tag and leaves it to a maintainer. Deleting it
+          # here could remove a live release if someone publishes the draft in between.
+          drafts=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .html_url" |
+            paste -sd ' ' -)
+          if [ -n "$drafts" ]; then
+            echo "::error::Release $tag has a draft that an earlier attempt left: $drafts. Delete it on the Releases page (or \`gh release delete $tag\` after checking it is still a draft), then rerun the publish job."
+            exit 1
+          fi
+          # This endpoint finds only a published release. A rerun goes on with it only if it has
+          # both bundles and the SHA256SUMS of this run, so the formula's hashes match what users
+          # download.
+          if gh api "repos/$GH_REPO/releases/tags/$tag" --silent 2> /dev/null; then
+            pub=$RUNNER_TEMP/published
+            if ! gh release download "$tag" --dir "$pub" --pattern 'sys1rust-*.tar.gz' --pattern SHA256SUMS ||
+              ! cmp -s dist/SHA256SUMS "$pub/SHA256SUMS" ||
+              ! (cd "$pub" && sha256sum --quiet --check SHA256SUMS); then
+              echo "::error::Release $tag is published with other files than this run built. Rerun only the failed jobs, or delete the release first."
+              exit 1
+            fi
+            echo "Release $tag is published with these bundles and SHA256SUMS"
+            exit 0
+          fi
+          flags=()
+          case "$tag" in *-rc*) flags+=(--prerelease) ;; esac
+          gh release create "$tag" dist/sys1rust-*.tar.gz dist/SHA256SUMS --verify-tag \
+            --title "sys1rust ${tag#v}" --generate-notes "${flags[@]}"
+      - name: Update the Homebrew formula
+        if: ${{ !contains(github.ref_name, '-rc') }}
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          formula=$RUNNER_TEMP/tap/Formula/sys1rust.rb
+          # A rerun of an older tag's publish job must not put its formula over a newer one. The
+          # tap-update group keeps a second tag's job from changing the tap after the clone.
+          if [ -f "$formula" ]; then
+            current=$(sed -n 's/^ *version "\(.*\)"$/\1/p' "$formula")
+            if ! [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::The tap's Formula/sys1rust.rb needs 1 version line with an X.Y.Z version, and it has '$current'."
+              exit 1
+            fi
+            if [ "$current" != "$version" ] &&
+              [ "$(printf '%s\n' "$current" "$version" | sort -V | tail -n 1)" = "$current" ]; then
+              echo "::notice::The tap has sys1rust $current, which is newer than $version, so the tap stays as it is. Release $GITHUB_REF_NAME is published."
+              exit 0
+            fi
+          fi
+          sha() { awk -v f="sys1rust-$version-$1-arm64.tar.gz" '$2 == f {print $1}' dist/SHA256SUMS; }
+          mkdir -p "$RUNNER_TEMP/tap/Formula"
+          packaging/render_formula.sh "$GITHUB_REF_NAME" "$(sha macos26)" "$(sha macos14)" > "$formula"
+          cd "$RUNNER_TEMP/tap"
+          git add Formula/sys1rust.rb
+          # A rerun after a successful push finds the formula unchanged. That is the wanted state,
+          # so the step succeeds without a commit.
+          if git diff --cached --quiet; then
+            echo "Formula/sys1rust.rb already describes $GITHUB_REF_NAME"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "sys1rust $version"
+          git push origin HEAD

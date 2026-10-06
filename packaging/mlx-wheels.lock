@@ -1,0 +1,3 @@
+# flavor  wheel URL  sha256 (from https://pypi.org/pypi/mlx-metal/0.32.2/json)
+macos14 https://files.pythonhosted.org/packages/f7/ab/ba1952908c5d2a5070cf1cfbfea0161c4751ea62299e2776819810917483/mlx_metal-0.32.2-py3-none-macosx_14_0_arm64.whl 3825fff379dbc107dd3413e564a06caeaa24819910ec49c0439e454c06a1b9b8
+macos26 https://files.pythonhosted.org/packages/dd/cd/4e50bf325100e7165e13d025f264362bf0009196269f9eaf87f2c6e738a2/mlx_metal-0.32.2-py3-none-macosx_26_0_arm64.whl e6abeac9ac5265830c9c1541b6f96e9be37a85c2446763a46ad466c63a3837ab
