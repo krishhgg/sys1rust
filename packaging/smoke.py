@@ -5,10 +5,11 @@ bench/reference/typed-decisions/smoke.jsonl by the rules of bench/harness/compar
 question's answer agrees unless the reference is a near tie, and probabilities are within
 MAX_DRIFT), then stops the server with SIGINT and requires exit code 0.
 
-Every answer must also be well formed: the reference's type and every field the reference has,
-so a near tie or a missing probability map can't hide a broken answer. A request that fails in
-transport, runs past REQUEST_TIMEOUT_S or returns bad JSON fails the run and stops sending. The
-server always gets stopped, also when this script gets SIGINT or SIGTERM.
+Every answer must also be well formed: the reference's type, every field the reference has and
+a probability for every label in the reference's map, so a near tie or a missing probability
+can't hide a broken answer. A request that fails in transport, runs past REQUEST_TIMEOUT_S or
+returns bad JSON fails the run and stops sending. The script always stops the server, also when
+it gets SIGINT or SIGTERM.
 
 Run `SYS1RUST pull` first. Usage: packaging/smoke.py PATH_TO_SYS1RUST
 """
@@ -37,11 +38,20 @@ KILL_TIMEOUT_S = 10
 
 
 class Interrupted(Exception):
-    """Raised by the SIGINT and SIGTERM handlers so the server cleanup in `finally` runs."""
+    """The SIGINT and SIGTERM handler raises this so the `finally` in main() stops the server."""
+
+
+# While Popen starts the server, on_signal only records the signal. main() raises it once `proc`
+# holds the server, so the cleanup in `finally` can't miss a child that Popen already started.
+launch = {"active": False, "pending": None}
 
 
 def on_signal(signum, _frame):
-    raise Interrupted(signal.Signals(signum).name)
+    name = signal.Signals(signum).name
+    if launch["active"]:
+        launch["pending"] = launch["pending"] or name
+        return
+    raise Interrupted(name)
 
 
 def is_number(v):
@@ -67,6 +77,10 @@ def malformed(got, want):
             return "no probabilities"
         if not all(is_number(p) for p in probs.values()):
             return "a probability is not a number"
+        # compare.py counts a missing label as 0, which can keep a broken answer under MAX_DRIFT.
+        missing = sorted(set(labels) - set(probs))
+        if missing:
+            return f"no probability for reference labels {missing}"
     return None
 
 
@@ -166,7 +180,7 @@ def run(proc, reqs, ref, failures, stats):
 
 
 def stop(proc):
-    """Stops the server with SIGINT and returns its exit status, or a note if SIGKILL was needed."""
+    """Stops the server with SIGINT and returns its exit status, or a note if it needed SIGKILL."""
     if proc.poll() is not None:
         return proc.returncode
     proc.send_signal(signal.SIGINT)
@@ -196,8 +210,14 @@ def main():
     signal.signal(signal.SIGTERM, on_signal)
     proc, code = None, "not started"
     try:
-        proc = subprocess.Popen([exe, "serve", "--offline", "--model", MODEL, "--port", "0"],
-                                stdout=subprocess.PIPE, text=True, env=env)
+        launch["active"] = True
+        try:
+            proc = subprocess.Popen([exe, "serve", "--offline", "--model", MODEL, "--port", "0"],
+                                    stdout=subprocess.PIPE, text=True, env=env)
+        finally:
+            launch["active"] = False
+        if launch["pending"]:
+            raise Interrupted(launch["pending"])
         run(proc, reqs, ref, failures, stats)
     except Exception as e:
         failures.append(f"stopped early: {e!r}")
