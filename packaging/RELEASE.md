@@ -2,7 +2,7 @@
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds both bundles on a macOS 26 runner, smoke-tests the macOS 14 bundle on a macOS 15 runner and the macOS 26 bundle on a macOS 26 runner, and publishes the GitHub release with `SHA256SUMS`. A final `vX.Y.Z` tag also updates `Formula/sys1rust.rb` in krishhgg/homebrew-tap. A `vX.Y.Z-rcN` tag publishes a prerelease and leaves the tap alone. A pull request that changes `packaging/` or the workflow runs the build and smoke jobs only.
 
-Run every command below from the repository root on an Apple silicon Mac with macOS 26.2 or later. Use 1 shell for all of them, because later steps reuse `version`, `RUSTUP_TOOLCHAIN`, `HF_HUB_CACHE` and `rc`. The tests, the smoke runs and the Homebrew service load a model on the GPU. Run each of them alone, with no other GPU work on the Mac.
+Run every command below from the repository root on a Mac with an M5-class GPU (GPU generation 17 or later) and macOS 26.2 or later. The strict suite's laya-mlx `settings` tests need MLX's NAX gemms and fail on the fallback that older GPUs get, while the smoke tests run on any Apple silicon Mac. Use 1 shell for all the commands, because later steps reuse `version`, `RUSTUP_TOOLCHAIN`, `HF_HUB_CACHE` and `rc`. The tests, the smoke runs and the Homebrew service load a model on the GPU. Run each of them alone, with no other GPU work on the Mac.
 
 1. Install the pinned Rust and select it for this shell. `packaging/build.sh` and `packaging/third_party.py` stop when `rustc` or `cargo` reports another version.
    ```sh

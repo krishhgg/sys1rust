@@ -3,13 +3,16 @@
 24 requests in bench/workloads/smoke.jsonl, compares the answers with the fp32 CPU reference in
 bench/reference/typed-decisions/smoke.jsonl by the rules of bench/harness/compare.py (each
 question's answer agrees unless the reference is a near tie, and probabilities are within
-MAX_DRIFT), then stops the server with SIGINT and requires exit code 0.
+MAX_DRIFT), then stops the server with SIGINT and requires exit code 0. confidence,
+answer_confidence and action.act_probability must be within MAX_DRIFT too.
 
-Every answer must also be well formed: the reference's type, every field the reference has and
-a probability for every label in the reference's map, so a near tie or a missing probability
-can't hide a broken answer. A request that fails in transport, runs past REQUEST_TIMEOUT_S or
-returns bad JSON fails the run and stops sending. The script always stops the server, also when
-it gets SIGINT or SIGTERM.
+Every reply must also have the reference's shape, as the strict suite checks it
+(runtime/crates/sys1rust/tests/live.rs): the reference's question ids, each answer's fields in
+the reference's order, the reference's probability labels in its order and the reference's
+legend. Probabilities, noul, the confidences and act_probability must be numbers in [0, 1], and
+score a finite number. So a near tie or a missing field can't hide a broken answer. A request
+that fails in transport, runs past REQUEST_TIMEOUT_S or returns bad JSON fails the run and stops
+sending. The script always stops the server, also when it gets SIGINT or SIGTERM.
 
 Run `SYS1RUST pull` first. Usage: packaging/smoke.py PATH_TO_SYS1RUST
 """
@@ -58,30 +61,52 @@ def is_number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def is_probability(v):
+    return is_number(v) and 0 <= v <= 1
+
+
 def malformed(got, want):
-    """Says why `got` can't stand in for the reference answer `want`, or returns None if it can."""
+    """Says why `got` can't stand in for the reference answer `want`, or returns None if it can.
+    live.rs asserts the same key lists, so an extra field or label fails here too."""
     if not isinstance(got, dict):
         return f"answer is {type(got).__name__}, not an object"
-    if got.get("type") != want["type"]:
-        return f"type {got.get('type')!r}, reference type {want['type']!r}"
+    if list(got) != list(want):
+        return f"fields {list(got)}, reference fields {list(want)}"
+    if got["type"] != want["type"]:
+        return f"type {got['type']!r}, reference type {want['type']!r}"
     labels = want.get("probabilities") or {}
-    choice = got.get("choice")
-    if "choice" in want and not (isinstance(choice, str) and choice in labels):
-        return f"choice {choice!r} is not a reference label"
-    for field in ("score", "noul"):
-        if field in want and not is_number(got.get(field)):
-            return f"{field} {got.get(field)!r} is not a number"
+    if "choice" in want and not (isinstance(got["choice"], str) and got["choice"] in labels):
+        return f"choice {got['choice']!r} is not a reference label"
+    if "score" in want and not is_number(got["score"]):
+        return f"score {got['score']!r} is not a number"
+    for field in ("noul", "confidence", "answer_confidence"):
+        if field in want and not is_probability(got[field]):
+            return f"{field} {got[field]!r} is not a number in [0, 1]"
+    if "legend" in want and got["legend"] != want["legend"]:
+        return f"legend {got['legend']!r}, reference legend {want['legend']!r}"
+    if "action" in want:
+        # The reference's action holds act_probability only.
+        action = got["action"]
+        if not isinstance(action, dict):
+            return f"action {action!r} is not an object"
+        for k in want["action"]:
+            if not is_probability(action.get(k)):
+                return f"action.{k} {action.get(k)!r} is not a number in [0, 1]"
     if "probabilities" in want:
-        probs = got.get("probabilities")
-        if not isinstance(probs, dict) or not probs:
-            return "no probabilities"
-        if not all(is_number(p) for p in probs.values()):
-            return "a probability is not a number"
-        # compare.py counts a missing label as 0, which can keep a broken answer under MAX_DRIFT.
-        missing = sorted(set(labels) - set(probs))
-        if missing:
-            return f"no probability for reference labels {missing}"
+        probs = got["probabilities"]
+        if not isinstance(probs, dict) or list(probs) != list(labels):
+            return f"probabilities {probs!r}, reference labels {list(labels)}"
+        if not all(is_probability(p) for p in probs.values()):
+            return "a probability is not a number in [0, 1]"
     return None
+
+
+def field_drift(got, want):
+    """The largest difference in confidence, answer_confidence and action.act_probability,
+    the probabilities that compare.py's drift leaves out. malformed() has checked them."""
+    pairs = [(got[f], want[f]) for f in ("confidence", "answer_confidence") if f in want]
+    pairs += [(got["action"][k], v) for k, v in want.get("action", {}).items()]
+    return max((abs(a - b) for a, b in pairs), default=0.0)
 
 
 def post(host, port, body, out):
@@ -111,6 +136,8 @@ def post(host, port, body, out):
 
 
 def check(rid, answers, want_all, failures, stats):
+    if list(answers) != list(want_all):
+        failures.append(f"{rid}: question ids {list(answers)}, reference {list(want_all)}")
     for q, want in want_all.items():
         stats["questions"] += 1
         where = f"{rid} {q}"
@@ -132,6 +159,7 @@ def check(rid, answers, want_all, failures, stats):
         if d is None:
             failures.append(f"{where}: no probability drift for {got}")
             continue
+        d = max(d, field_drift(got, want))
         stats["worst"] = max(stats["worst"], d)
         if d > MAX_DRIFT:
             failures.append(f"{where}: drift {d:.4f} > {MAX_DRIFT}")
