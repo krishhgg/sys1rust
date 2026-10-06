@@ -3,11 +3,15 @@
 (normal dependencies on aarch64-apple-darwin) with its license expression and the license
 files in its source, then mlx-c, which mlx-sys builds and links in statically.
 
+It runs `cargo metadata` only with the Rust version in packaging/rust-toolchain-version, the
+one build.sh checks before it builds.
+
 Usage: packaging/third_party.py > THIRD_PARTY.md
 """
 import json
 import os
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "UNLICENSE")
@@ -26,6 +30,13 @@ def license_files(d):
 
 
 def main():
+    with open(os.path.join(ROOT, "packaging", "rust-toolchain-version")) as f:
+        rust = f.read().strip()
+    got = subprocess.check_output(["cargo", "--version"], text=True).split()[1]
+    if got != rust:
+        sys.exit(f"third_party.py: cargo is {got}, but the release build needs {rust} "
+                 f"(packaging/rust-toolchain-version). Run 'rustup toolchain install {rust}' "
+                 f"and build with RUSTUP_TOOLCHAIN={rust}.")
     meta = json.loads(subprocess.check_output([
         "cargo", "metadata", "--format-version", "1", "--locked",
         "--manifest-path", os.path.join(ROOT, "runtime", "Cargo.toml"),

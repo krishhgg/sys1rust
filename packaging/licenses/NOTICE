@@ -1,0 +1,35 @@
+lib/ holds libmlx.dylib, libjaccl.dylib and mlx.metallib from the mlx-metal 0.32.2 wheel on
+PyPI, built from MLX 0.32.2 (https://github.com/ml-explore/mlx at
+1f8e74e3f12f31365464a6867c6579f0e9b29d85), Copyright 2023 Apple Inc., licensed under the MIT
+License (see licenses/MLX-LICENSE). MLX compiles the third-party code below into them. Each file
+in licenses/ names its source and commit at the top.
+
+  nlohmann/json 3.11.3, in libmlx.dylib and libjaccl.dylib. Copyright 2013-2022 Niels Lohmann,
+  MIT License, with parts by Björn Hoehrmann, Florian Loitsch and Evan Nemerson (MIT) and the
+  Abseil Authors (Apache License 2.0, see LICENSE). See licenses/nlohmann-json-3.11.3.txt.
+
+  gguflib from gguf-tools (https://github.com/antirez/gguf-tools), in libmlx.dylib.
+  Copyright 2022 Georgi Gerganov, MIT License. See licenses/gguf-tools-8fa6eb6.txt.
+
+  FP16 (https://github.com/Maratyszcza/FP16), the source of gguflib's fp16.c, in libmlx.dylib.
+  Copyright 2017 Facebook Inc., 2017 Georgia Institute of Technology and 2019 Google LLC,
+  MIT License. See licenses/fp16-ba1d31f.txt.
+
+  metal-cpp 26 (https://developer.apple.com/metal/cpp/), in libmlx.dylib. Copyright 2024 Apple
+  Inc., Apache License 2.0. See licenses/metal-cpp-26.txt.
+
+  PocketFFT, MLX's mlx/3rdparty/pocketfft.h, in libmlx.dylib. Copyright 2010-2022
+  Max-Planck-Society, 2019-2020 Peter Bell, and for the DCT-IV code 2003 and 2007-2014 Matteo
+  Frigo and the Massachusetts Institute of Technology, BSD 3-Clause License. See
+  licenses/pocketfft-mlx-0.32.2.txt.
+
+  SmallVector from V8, MLX's mlx/small_vector.h, in libmlx.dylib. Copyright 2018 the V8 project
+  authors, BSD 3-Clause License. See licenses/v8-small-vector-mlx-0.32.2.txt.
+
+  expm1f by Norbert Juffa, MLX's mlx/backend/metal/kernels/expm1f.h, in mlx.metallib and as
+  kernel source in libmlx.dylib. Copyright 2015-2023 Norbert Juffa, BSD 2-Clause License. See
+  licenses/expm1f-mlx-0.32.2.txt.
+
+  cexpf from NVIDIA Thrust, MLX's mlx/backend/metal/kernels/cexpf.h, in mlx.metallib and as
+  kernel source in libmlx.dylib. Copyright 2008-2013 NVIDIA Corporation and 2013 Filipe RNC Maia,
+  Apache License 2.0 (see LICENSE). See licenses/thrust-cexpf-mlx-0.32.2.txt.
