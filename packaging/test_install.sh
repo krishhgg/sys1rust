@@ -284,9 +284,18 @@ with open(sys.argv[2], "w") as f:
     f.write(str(server.server_port))
 server.serve_forever()
 EOF
-python3 "$T/server.py" "$W" "$T/server-port" &
+python3 "$T/server.py" "$W" "$T/server-port" >"$T/server.log" 2>&1 &
 SERVER_PID=$!
-for _ in $(seq 50); do [ -s "$T/server-port" ] && break; sleep 0.1; done
+for _ in $(seq 600); do
+  [ -s "$T/server-port" ] && break
+  kill -0 "$SERVER_PID" 2>/dev/null || break
+  sleep 0.1
+done
+if [ ! -s "$T/server-port" ]; then
+  echo "The fixture release server did not report its port within 60 s" >&2
+  cat "$T/server.log" >&2
+  exit 1
+fi
 URL=http://127.0.0.1:$(cat "$T/server-port")/releases
 run SYS1RUST_RELEASES_URL="$URL" -- --prefix "$T/u" --bin-dir "$T/u/bin"
 check "latest release" eval '[ $status = 0 ] && version_is "$T/u/current" 0.2.0-macos26 && has "Downloading $URL/download/v0.2.0/sys1rust-0.2.0-macos26-arm64.tar.gz"'
@@ -387,7 +396,11 @@ rm "$LOG" "$LOG.original"
 OTHER_PORT=$(free_port)
 python3 -m http.server --bind 127.0.0.1 --directory "$T/launchd/www" "$OTHER_PORT" >/dev/null 2>&1 &
 OTHER=$!
-for _ in $(seq 50); do curl -fs -o /dev/null "http://127.0.0.1:$OTHER_PORT/health" && break; sleep 0.1; done
+for _ in $(seq 600); do
+  curl -fs -o /dev/null "http://127.0.0.1:$OTHER_PORT/health" 2>/dev/null && break
+  kill -0 "$OTHER" 2>/dev/null || break
+  sleep 0.1
+done
 run LAYA_PORT="$OTHER_PORT" -- --from "$T/d1" --prefix "$T/s3" --bin-dir "$T/sb3" --service
 kill "$OTHER"
 wait "$OTHER" 2>/dev/null || true
@@ -438,7 +451,11 @@ env -i HOME="$T/home" PATH="$T/fake:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$T" \
   FAKE_LAUNCHD="$T/launchd" FAKE_MV_MODE=pause FAKE_MV_READY="$T/ready" FAKE_MV_RESUME="$T/resume" \
   "$SH" "$ROOT/install.sh" --from "$T/d2" --prefix "$T/atomic" --bin-dir "$T/atomic-bin" >"$T/overlap.log" 2>&1 &
 INSTALL_PID=$!
-for _ in $(seq 50); do [ -e "$T/ready" ] && break; sleep 0.1; done
+for _ in $(seq 600); do
+  [ -e "$T/ready" ] && break
+  kill -0 "$INSTALL_PID" 2>/dev/null || break
+  sleep 0.1
+done
 check "the first install holds the lock" test -f "$T/ready"
 run --from "$T/d3" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
 check "an overlapping update refuses the lock" eval '[ $status = 1 ] && has "another installer is running" && link_is "$T/atomic/current" "$active"'
