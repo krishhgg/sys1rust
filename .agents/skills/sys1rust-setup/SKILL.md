@@ -7,6 +7,8 @@ description: Install, update, start, check, stop or uninstall sys1rust, the loca
 
 This skill installs the prebuilt `sys1rust` with `install.sh`, downloads a model, starts the server and checks that it answers. Follow the steps in order, and run each command from the root of the sys1rust clone. Without a clone, run each `./install.sh ARGS` below as `curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh -s -- ARGS`.
 
+Put any environment assignments for the installer after `|`, immediately before `sh`, or before `arch` under Rosetta. This passes the settings to the interpreter that runs the installer. Step 5 gives the exact service commands for a chosen port.
+
 Write only to the clone, `~/.local/share/sys1rust`, `~/.local/bin`, `~/Library/LaunchAgents`, `~/Library/Logs` and the Hugging Face cache. Ask the user before you write anywhere else, edit a shell startup file or delete a model. Never use `sudo`. If your sandbox blocks the network or the GPU, ask the user to let these commands run outside it.
 
 ## 1. Check the Mac
@@ -88,11 +90,27 @@ Ask the user how they want to run it, unless their request already says:
 
 If you can't ask, choose "only when they start it".
 
-For the service, run:
+For the service from a clone, run:
 
 ```sh
 PORT=${PORT:-8000}
-LAYA_PORT=$PORT ./install.sh --service
+LAYA_PORT="$PORT" ./install.sh --service
+```
+
+Without a clone, run:
+
+```sh
+PORT=${PORT:-8000}
+curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh |
+  LAYA_PORT="$PORT" sh -s -- --service
+```
+
+Under Rosetta, run the installer with a native interpreter and keep the assignment before `arch`:
+
+```sh
+PORT=${PORT:-8000}
+curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh |
+  LAYA_PORT="$PORT" arch -arm64 /bin/sh -s -- --service
 ```
 
 The installer writes `~/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist` with `LAYA_PORT` in it, starts the service and waits up to 60 s until `GET /health` answers on that port. The server logs to `~/Library/Logs/sys1rust.log`. If the installer exits with an error, read the last lines of that log.
@@ -169,7 +187,7 @@ Refresh the clone first. Run the clone block in `AGENTS.md` again if you made th
 
 ```sh
 PORT=$(plutil -extract EnvironmentVariables.LAYA_PORT raw ~/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist 2>/dev/null || echo 8000)
-LAYA_PORT=$PORT ./install.sh
+LAYA_PORT="$PORT" ./install.sh
 ```
 
 The first line reads the service's port from its LaunchAgent, and gives 8000 when there is no LaunchAgent or it sets no port. The installer itself also reads an existing service's port and cache from that plist before checking a restarted service. The installer installs the latest release, moves the `current` link to it, keeps the version before it as `previous` and deletes older ones. If the service runs, the installer restarts it on the new version and waits for `/health` on that port. Restart a server you started yourself with `kill <pid>` and the start block in step 5, with its port. If the new release pins a new model revision, run `~/.local/bin/sys1rust pull` to download it ahead of time, or the next `serve` downloads it. Then repeat step 6.
