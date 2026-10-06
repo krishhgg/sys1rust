@@ -30,7 +30,7 @@ df -H ~ | awk 'NR==2 {print $4}'      # free space on the home volume
 ./install.sh
 ```
 
-The installer downloads the latest release for this Mac, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/share/sys1rust/<version>-<flavor>.<id>/`, points `~/.local/share/sys1rust/current` at it and links `~/.local/bin/sys1rust`. It records its paths in `~/.local/share/sys1rust/.sys1rust-install`, refuses a nonempty prefix without that registry and serializes changes with a prefix lock. It downloads no model. `--version vX.Y.Z` installs a given release instead, and `./install.sh --help` lists every option. Check the result:
+The installer downloads the latest release for this Mac, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/share/sys1rust/<version>-<flavor>.<id>/`, points `~/.local/share/sys1rust/current` at it and links `~/.local/bin/sys1rust`. It records its paths in `~/.local/share/sys1rust/.sys1rust-install` and refuses a nonempty prefix without that registry. It locks the prefix, bin directory and shared LaunchAgent path so installs with different prefixes cannot overwrite shared paths. It downloads no model. `--version vX.Y.Z` installs a given release instead, and `./install.sh --help` lists every option. Check the result:
 
 ```sh
 ~/.local/bin/sys1rust --version
@@ -170,6 +170,8 @@ LAYA_PORT=$PORT ./install.sh
 ```
 
 The first line reads the service's port from its LaunchAgent, and gives 8000 when there is no LaunchAgent or it sets no port. The installer itself also reads an existing service's port and cache from that plist before checking a restarted service. The installer installs the latest release, moves the `current` link to it, keeps the version before it as `previous` and deletes older ones. If the service runs, the installer restarts it on the new version and waits for `/health` on that port. Restart a server you started yourself with `kill <pid>` and the start block in step 5, with its port. If the new release pins a new model revision, run `~/.local/bin/sys1rust pull` to download it ahead of time, or the next `serve` downloads it. Then repeat step 6.
+
+Rerun an interrupted update to finish any pending service restart. The installer accepts `/health` only when the LaunchAgent's PID owns the listening port, so a foreground server cannot hide a failed service restart.
 
 ## Uninstall
 
