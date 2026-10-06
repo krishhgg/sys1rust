@@ -24,8 +24,11 @@ Run every command below from the repository root on a Mac with an M5-class GPU (
    ```
 3. Build both bundles, run the strict suite against the macOS 26 MLX build, and smoke-test both bundles. The laya-mlx tests do not ask for the pinned revisions. They load the snapshot that a model's `refs/main` names, or else the model's only snapshot, and `sys1rust pull` writes no `refs/main`. So this step pulls the 3 pinned models (846 MB, 678 MB and 846 MB) into a fresh cache under `packaging/.work`, which then holds only the pinned snapshots. `HF_HUB_CACHE` points every later command in this shell at that cache. Every command must pass. The laya-mlx `settings` tests take about 14 minutes.
    ```sh
-   packaging/build.sh macos26 dist && packaging/build.sh macos14 dist
    export HF_HUB_CACHE=$PWD/packaging/.work/hf-cache
+   (
+   set -e
+   packaging/build.sh macos26 dist
+   packaging/build.sh macos14 dist
    rm -rf "$HF_HUB_CACHE"
    for m in typed-decisions multilingual english; do
      packaging/.work/macos26/sys1rust-$version-macos26-arm64/bin/sys1rust pull $m
@@ -41,21 +44,55 @@ Run every command below from the repository root on a Mac with an M5-class GPU (
    for fl in macos26 macos14; do
      python3 packaging/smoke.py packaging/.work/$fl/sys1rust-$version-$fl-arm64/bin/sys1rust
    done
+   )
    ```
 4. Tag a release candidate and push the tag. `rc` holds the candidate's tag for this step and the next. The workflow builds and smoke-tests the bundles and publishes a prerelease. Follow the run on the repository's Actions page. If a job fails, merge the fix to main, run `git pull --ff-only`, set `rc` to the next candidate, such as `v$version-rc2`, and run the tag line again.
    ```sh
    rc=v$version-rc1
    git tag "$rc" && git push origin "$rc"
    ```
-5. Install the candidate with `install.sh` into a scratch prefix, as a user would. `install.sh` downloads the bundle for this Mac and checks it against the prerelease's `SHA256SUMS`. Then check that it serves in this shell and as a LaunchAgent. `--service` passes this shell's `HF_HUB_CACHE` into the LaunchAgent, so the service loads typed-decisions from the cache that step 3 filled. `install.sh --service` waits up to 60 s for `/health`, and if the server fails it prints the end of `~/Library/Logs/sys1rust.log`. Every install uses the same LaunchAgent label, so `--service` here replaces a sys1rust service that this account already runs. Run `install.sh --service` again afterward to bring that one back. `--uninstall` removes the scratch install, the LaunchAgent and its log, and keeps the models.
+5. Install the candidate with `install.sh` into a scratch prefix, as a user would. `install.sh` downloads the bundle for this Mac and checks it against the prerelease's `SHA256SUMS`. Then check that this candidate serves on a free port in this shell and as a LaunchAgent. The Python block reads the candidate's ready line, verifies its process id and checks its own `/health`, with a 60 s deadline. It always stops the child. `--service` passes this shell's `HF_HUB_CACHE` into the LaunchAgent, so the service loads typed-decisions from the cache that step 3 filled. `install.sh --service` waits up to 60 s for `/health`, and if the server fails it prints the end of `~/Library/Logs/sys1rust.log`. Every install uses the same LaunchAgent label, so `--service` here replaces a sys1rust service that this account already runs. Run `install.sh --service` again afterward to bring that one back. `--uninstall` removes the scratch install, the LaunchAgent and its log, and keeps the models.
    ```sh
+   (
+   set -e
    tmp=$(mktemp -d)
    ./install.sh --version "$rc" --prefix "$tmp" --bin-dir "$tmp/bin"
-   "$tmp/bin/sys1rust" serve & pid=$!
-   until curl -fs 127.0.0.1:8000/health; do sleep 2; done
-   kill "$pid" && wait "$pid"
+   python3 - "$tmp/bin/sys1rust" <<'PY'
+   import json, select, subprocess, sys, time, urllib.request
+
+   proc = subprocess.Popen([sys.argv[1], "serve", "--port", "0"],
+                           stdout=subprocess.PIPE, text=True)
+   try:
+       deadline = time.monotonic() + 60
+       while True:
+           remaining = deadline - time.monotonic()
+           if remaining <= 0:
+               raise TimeoutError("candidate did not become ready in 60 s")
+           if proc.poll() is not None:
+               raise RuntimeError(f"candidate exited with code {proc.returncode}")
+           if select.select([proc.stdout], [], [], min(remaining, 0.2))[0]:
+               line = proc.stdout.readline()
+               if not line:
+                   raise RuntimeError("candidate closed stdout before becoming ready")
+               ready = json.loads(line)
+               if ready["event"] != "listening" or ready["pid"] != proc.pid:
+                   raise RuntimeError(f"unexpected candidate ready line: {ready}")
+               break
+       with urllib.request.urlopen(f"http://{ready['addr']}/health", timeout=5) as reply:
+           assert json.load(reply)["status"] == "ok"
+       print(f"candidate {proc.pid} answers on {ready['addr']}")
+   finally:
+       proc.terminate()
+       try:
+           proc.wait(timeout=30)
+       except subprocess.TimeoutExpired:
+           proc.kill()
+           proc.wait()
+   PY
+   export LAYA_PORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
    ./install.sh --version "$rc" --prefix "$tmp" --bin-dir "$tmp/bin" --service
    ./install.sh --uninstall --prefix "$tmp" --bin-dir "$tmp/bin"
+   )
    ```
 6. Tag the release and push the tag. The workflow publishes the release, and `releases/latest` then points to it, so `install.sh` without `--version` installs it.
    ```sh
