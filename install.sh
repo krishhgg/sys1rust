@@ -158,6 +158,13 @@ check_owned_link() {
   fi
 }
 
+check_bin_link() {
+  if [ -e "$link" ] && [ ! -L "$link" ]; then
+    die "$link exists and is not a link. Move it away or pick another --bin-dir"
+  fi
+  check_owned_link "$link" "$owner/bin-target"
+}
+
 link_matches() {
   [ -L "$1" ] && {
     [ "$(readlink "$1")" = "$(cat "$2" 2>/dev/null)" ] ||
@@ -647,22 +654,22 @@ main() {
   trap 'exit 143' TERM
   acquire_lock "$lock"
   check_prefix
-  # Different prefixes can share a bin link, and every service uses the same label and
-  # plist. Hold both shared locks before checking ownership or changing these paths.
-  mkdir -p "$bin_dir" "${shared_lock%/*}"
+  # Every service uses the same label and plist. Installs take the bin lock after bundle
+  # validation below, so a failed first download never creates bin parents inside an
+  # unregistered prefix.
+  mkdir -p "${shared_lock%/*}"
   acquire_lock "$shared_lock"
-  acquire_lock "$bin_lock"
 
   if [ "$remove" = 1 ]; then
+    mkdir -p "$bin_dir"
+    acquire_lock "$bin_lock"
     uninstall
     return 0
   fi
 
   check_mac
-  if [ -e "$link" ] && [ ! -L "$link" ]; then
-    die "$link exists and is not a link. Move it away or pick another --bin-dir"
-  fi
-  check_owned_link "$link" "$owner/bin-target"
+  # Refuse a foreign link before downloading, then check it again under the bin lock.
+  check_bin_link
   check_owned_link "$prefix/current" "$owner/current"
   check_owned_link "$prefix/previous" "$owner/previous"
   if [ -n "$from" ]; then
@@ -706,6 +713,15 @@ main() {
     printf '%s\n' "$dir" >"$new/.sys1rust-owned"
     printf '%s\n' "$tag-$flavor" >"$new/.sys1rust-release"
     : >"$owner/versions/$dir"
+  fi
+
+  # The bundle is ready and the prefix has its registry before any bin parents appear.
+  # Different HOME values can still share this bin directory, so recheck its link after
+  # acquiring the lock and before switching current or changing the bin link.
+  mkdir -p "$bin_dir"
+  acquire_lock "$bin_lock"
+  check_bin_link
+  if [ -n "$stage" ]; then
     # The working version stays in place. Only current changes after this move succeeds.
     mv "$new" "$target"
   fi
@@ -719,7 +735,6 @@ main() {
     if [ -n "$old" ] && owned_version "$old"; then record_link "$old" "$prefix/previous" "$owner/previous"; fi
     record_link "$dir" "$prefix/current" "$owner/current"
   fi
-  mkdir -p "$bin_dir"
   if [ "$(readlink "$link" 2>/dev/null || true)" != "$prefix/current/bin/sys1rust" ]; then
     record_link "$prefix/current/bin/sys1rust" "$link" "$owner/bin-target"
   fi

@@ -258,6 +258,10 @@ run --from "$T/d4" --prefix "$P" --bin-dir "$B"
 check "bad checksum fails" eval '[ $status = 1 ] && has "install.sh: sys1rust-0.4.0-macos26-arm64.tar.gz has sha256"'
 check "bad checksum changes nothing" eval '[ "$(state "$P" "$B")" = "$before" ]'
 check "bad checksum leaves no staging dir" eval '[ -z "$(find "$P" -maxdepth 1 -name ".install.*")" ]'
+run --from "$T/d4" --prefix "$T/nested-checksum" --bin-dir "$T/nested-checksum/tools/bin"
+check "a bad checksum leaves no nested bin parents" eval '[ $status = 1 ] && has "has sha256" && [ ! -e "$T/nested-checksum" ]'
+run --from "$T/d1" --prefix "$T/nested-checksum" --bin-dir "$T/nested-checksum/tools/bin"
+check "a nested bin install retries after a bad checksum" eval '[ $status = 0 ] && version_is "$T/nested-checksum/current" 0.1.0-macos26 && "$T/nested-checksum/tools/bin/sys1rust" --version >/dev/null'
 mkdir -p "$T/b2" && touch "$T/b2/sys1rust"
 run --from "$T/d1" --prefix "$T/p2" --bin-dir "$T/b2"
 check "a file at the link path" eval '[ $status = 1 ] && has "install.sh: $T/b2/sys1rust exists and is not a link"'
@@ -323,6 +327,10 @@ run SYS1RUST_RELEASES_URL="$URL" -- --version v9.9.9 --prefix "$T/u" --bin-dir "
 check "missing tag" eval '[ $status = 1 ] && has "install.sh: there is no release v9.9.9"'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v9.9.9 --prefix "$T/u3" --bin-dir "$T/u3/bin"
 check "a failed first install leaves no prefix" eval '[ $status = 1 ] && [ ! -e "$T/u3" ]'
+run SYS1RUST_RELEASES_URL="$URL" -- --version v9.9.9 --prefix "$T/nested-missing" --bin-dir "$T/nested-missing/tools/bin"
+check "a missing release leaves no nested bin parents" eval '[ $status = 1 ] && has "there is no release v9.9.9" && [ ! -e "$T/nested-missing" ]'
+run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$T/nested-missing" --bin-dir "$T/nested-missing/tools/bin"
+check "a nested bin install retries after a missing release" eval '[ $status = 0 ] && version_is "$T/nested-missing/current" 0.2.0-macos26 && "$T/nested-missing/tools/bin/sys1rust" --version >/dev/null'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v0.5.0 --prefix "$T/u" --bin-dir "$T/u/bin"
 check "release without SHA256SUMS" eval '[ $status = 1 ] && has "install.sh: release v0.5.0 has no SHA256SUMS"'
 run SYS1RUST_RELEASES_URL="$URL" FAKE_MACOS=15.5 -- --version v0.2.0 --prefix "$T/u" --bin-dir "$T/u/bin"
