@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
+  <a href="#install"><strong>Install</strong></a> ·
   <a href="#speed"><strong>Speed</strong></a> ·
-  <a href="results/README.md"><strong>Results</strong></a> ·
-  <a href="#build"><strong>Build</strong></a>
+  <a href="results/README.md"><strong>Results</strong></a>
 </p>
 
 <p align="center">
@@ -19,27 +19,37 @@
   <img alt="No Python at run time" src="https://img.shields.io/badge/Python_at_run_time-none-BF6A2B?style=flat-square">
 </p>
 
-## Build
+## Install
 
-There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python only fetches MLX. `sys1rust` doesn't run it.
+On an Apple silicon Mac with macOS 14 or later:
 
 ```sh
-# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files).
-python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2
-export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os.path.dirname(mlx.core.__file__))')"
-
-# The binaries go to runtime/target/release/.
-cargo build --release --manifest-path runtime/Cargo.toml
+brew install krishhgg/tap/sys1rust
+sys1rust serve
 ```
 
-The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is. A self-contained release is the next step.
+The first `serve` downloads the typed-decisions model (846 MB) into the Hugging Face cache, then listens on 127.0.0.1:8000. `sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. To run the server in the background now and at every login:
+
+```sh
+brew services start sys1rust
+```
+
+It logs to `$(brew --prefix)/var/log/sys1rust.log`. On macOS 26.2 or later, Homebrew installs the bundle with MLX's build for that version, which is about 3x faster on the M5 than the bundle for macOS 14 to 26.1. The speed numbers in this README use the macOS 26 build.
+
+Without Homebrew, download a tarball from [Releases](https://github.com/krishhgg/sys1rust/releases). `sys1rust-<version>-macos26-arm64.tar.gz` needs macOS 26.2 or later, and the `macos14` tarball runs on macOS 14 to 26.1. Unpack it, then clear the quarantine flag the browser set. The release signs the binary ad hoc without notarizing it, so macOS refuses to run it while the flag is set:
+
+```sh
+xattr -dr com.apple.quarantine sys1rust-*
+```
+
+Then run `bin/sys1rust serve` from the unpacked folder. The binary loads MLX from the `lib/` folder next to `bin/`, so keep the folder together.
 
 ## Try it
 
-Start the server. The first start downloads the typed-decisions model (846 MB) into the Hugging Face cache:
+Start the server, unless `brew services` already runs it:
 
 ```sh
-runtime/target/release/sys1rust serve --port 8000
+sys1rust serve
 ```
 
 It prints `listening on http://127.0.0.1:8000` when it's ready. In another terminal:
@@ -118,6 +128,21 @@ Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on mac
 
 The first `serve` of a model downloads it. `--model` also takes a local checkpoint directory, which `sys1rust` reads without downloading anything; the Hugging Face CLI's `hf download <repo>` fetches another hub checkpoint and prints its directory.
 
+## Build from source
+
+You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python only fetches MLX. `sys1rust` doesn't run it.
+
+```sh
+# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files).
+python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2
+export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os.path.dirname(mlx.core.__file__))')"
+
+# The binaries go to runtime/target/release/.
+cargo build --release --manifest-path runtime/Cargo.toml
+```
+
+Then run `runtime/target/release/sys1rust serve`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is.
+
 ## More
 
 <details>
@@ -137,11 +162,11 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 | `--f32` | `SYS1_F32` | off | run the transformer in f32 instead of the checkpoint's f16 |
 | `--offline` | `HF_HUB_OFFLINE` | off | never download; a model that is not in the cache is an error. `HF_HUB_OFFLINE` turns it on when set to `1`, `ON`, `YES` or `TRUE`, in any letter case |
 
-`sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. Downloads honor `HF_ENDPOINT` and `HF_TOKEN`. `sys1rust` sends the token only to the endpoint, never after a redirect.
+Downloads honor `HF_ENDPOINT` and `HF_TOKEN`. `sys1rust` sends the token only to the endpoint, never after a redirect.
 
 `sys1rust` sets MLX's `MLX_MAX_MB_PER_BUFFER` to 10, measured faster on the M5, unless it is already set. At load it checks its M5 matmul kernels against MLX's, bit for bit, and prints the result on stderr. If the check fails, it uses MLX's matmuls and prints why.
 
-When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `runtime/target/release/sys1rust serve --help` lists everything.
+When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `sys1rust serve --help` lists everything.
 
 </details>
 
@@ -156,7 +181,7 @@ To serve clients on other machines, run a reverse proxy on the same Mac in front
 
 ```sh
 export LAYA_API_KEY=replace-with-a-secret
-runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.0.0.1:8000
+sys1rust serve --port 8000   # the proxy forwards to 127.0.0.1:8000
 ```
 
 `--host` changes the bind address, but any client that can reach a wider address talks to `sys1rust` directly, with none of the proxy's protections.
@@ -176,7 +201,7 @@ runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.
 <details>
 <summary><strong>Build and run inside the benchmark setup</strong></summary>
 
-Use this instead of [Build](#build) when working on the benchmark. `bench/env.sh` takes MLX from the laya-mlx contender's venv but does not create it, so the first step sets that venv up once, as in `bench/contenders/laya-mlx/NOTES.md`. That step needs `uv`. The script also keeps the Cargo output and the Hugging Face cache under `bench/`, so the binary is at `$CARGO_TARGET_DIR/release/sys1rust`. The commands download and serve the typed-decisions revision pinned in `bench/models.lock.json`, the one the results used.
+Use this instead of [Build from source](#build-from-source) when working on the benchmark. `bench/env.sh` takes MLX from the laya-mlx contender's venv but does not create it, so the first step sets that venv up once, as in `bench/contenders/laya-mlx/NOTES.md`. That step needs `uv`. The script also keeps the Cargo output and the Hugging Face cache under `bench/`, so the binary is at `$CARGO_TARGET_DIR/release/sys1rust`. The commands download and serve the typed-decisions revision pinned in `bench/models.lock.json`, the one the results used.
 
 ```sh
 source bench/env.sh
