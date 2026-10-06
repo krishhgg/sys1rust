@@ -53,7 +53,7 @@ command -v sys1rust
 ## 4. Download the model
 
 ```sh
-~/.local/bin/sys1rust pull
+~/.local/bin/sys1rust pull typed-decisions
 ```
 
 This downloads typed-decisions, the default model, at the revision the release pins (846 MB) into the Hugging Face cache. The cache is `~/.cache/huggingface/hub` unless `HF_HUB_CACHE`, `HF_HOME` or `XDG_CACHE_HOME` is set. `pull` prints its progress on stderr and the snapshot directory on stdout. If it stops partway, run it again, and it resumes where it stopped. Download another model only if the user asks for it, with `~/.local/bin/sys1rust pull multilingual` (678 MB) or `~/.local/bin/sys1rust pull english` (846 MB). Then check:
@@ -102,7 +102,8 @@ To start it yourself, run:
 ```sh
 PORT=${PORT:-8000}
 mkdir -p ~/Library/Logs
-nohup ~/.local/bin/sys1rust serve --port $PORT >> ~/Library/Logs/sys1rust-serve.log 2>&1 &
+env -u LAYA_API_KEY -u SYS1_REVISION nohup ~/.local/bin/sys1rust serve \
+  --host 127.0.0.1 --model typed-decisions --port "$PORT" >> ~/Library/Logs/sys1rust-serve.log 2>&1 &
 pid=$!
 echo "$pid"
 ready=0
@@ -118,6 +119,8 @@ if [ "$ready" = 0 ]; then
   false
 fi
 ```
+
+The command selects typed-decisions on `127.0.0.1` without authentication, matching step 6. `env -u` removes an inherited API key and revision only for the child process. The shell keeps its settings. If the user requested another model or authentication, use their choices and adapt step 6 to that model and its required authorization.
 
 It prints the process id, then the `/health` reply once the server answers. Keep the process id, because the user needs it to stop the server. A start with the model already downloaded takes a few seconds at most. The first start of a new install takes about 1.7 s longer while macOS compiles the GPU kernels. When the server is ready, its log ends with `sys1rust: listening on http://127.0.0.1:<port> (auth off)`. If no `/health` reply follows the process id, read the log with `tail -n 30 ~/Library/Logs/sys1rust-serve.log` and see "When something fails" below.
 
@@ -155,7 +158,7 @@ Report in a few lines:
 | it runs as | stop it with | start it again with |
 | --- | --- | --- |
 | the LaunchAgent | `launchctl bootout gui/$(id -u)/io.github.krishhgg.sys1rust` | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist`, or the next login |
-| a process you started | `kill <pid>` | `sys1rust serve --port <port>`, or `sys1rust serve` for port 8000 |
+| a process you started | `kill <pid>` | Repeat the start block in step 5 with the chosen port. |
 | `sys1rust serve` in a terminal | Ctrl-C | the same command |
 
 `launchctl bootout` stops the service until the next login. `./install.sh --uninstall` removes it.
@@ -190,7 +193,7 @@ Rerun an interrupted update to finish any pending service restart. The installer
 | A download stopped partway | Run the same command again. `sys1rust pull` and `sys1rust serve` resume a partial model download, and the installer is safe to rerun. |
 | The installer reports another installer is running | Wait for that operation to finish, then rerun. For a stale lock, check that no installer runs and use the recovery command in the error. Never remove a live lock. |
 | The installer reports no installer registry | Check that you used the intended prefix. Do not delete foreign files or make a registry by hand. Use an empty prefix for a new install. |
-| The Mac is offline | `~/.local/bin/sys1rust serve --offline`, or `HF_HUB_OFFLINE=1`, loads only what the cache holds and never downloads. A missing model is then an error that names the `sys1rust pull <model>` command to run. Run it while online. The installer needs the network, unless `--from DIR` points it at release files downloaded earlier (see `./install.sh --help`). |
+| The Mac is offline | Add `--offline` to the start command in step 5 to load only what the cache holds and never download. `HF_HUB_OFFLINE=1` also turns this on. A missing model is then an error that names the `sys1rust pull <model>` command to run. Run it while online. The installer needs the network, unless `--from DIR` points it at release files downloaded earlier (see `./install.sh --help`). |
 | `laya-mlx: nax is off for this load, MLX's gemms run instead: ...` on stderr | This is expected with the `macos14` bundle and on GPUs older than the M5's, and it isn't an error. sys1rust runs MLX's own matmuls instead and serves normally. Other `laya-mlx: ... is off for this load` lines are fallbacks of the same kind. |
 | `curl` can't connect | The server isn't up, has exited or listens on another port. Read the end of its log, `~/Library/Logs/sys1rust.log` for the service or `~/Library/Logs/sys1rust-serve.log` for one you started. |
 | `/health` answers 503 with `"worker":"not running"` | The inference thread stopped. Restart the server and read its log. |

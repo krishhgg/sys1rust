@@ -39,7 +39,9 @@ A running server answers 200 with `"status":"ok"` and names its model in `loaded
   - `score` takes `criteria` as a list of level descriptions, level 0 first, up to 32 levels.
   - `noul` is a yes or no question. Its `criteria` is optional, an object with a `"true"` description, a `"false"` one or both.
   - All the questions together take at most 512 options.
-- `model` is optional. Leave it out. A name or repo id of a Laya model other than the one the server runs gets 400. The server ignores any other value, `null` included.
+- `model` is optional. Leave it out to use the served checkpoint. The names `typed-decisions`, `multilingual` and `english`, and the repo ids for typed-decisions and multilingual, get 400 when they name a different checkpoint from the one served. The server ignores other values, `null` included.
+
+  In this request field, `convaiinnovations/laya` means "use the served checkpoint", so it is accepted even on a typed-decisions server. Use `english` to name the English checkpoint explicitly. On the command line, `--model convaiinnovations/laya` selects English.
 - `max_len` and `head_max_len` get 422 when they hold any value but `null`, because sys1rust doesn't support them. Absent or `null`, they are ignored.
 - The body must be standard JSON in UTF-8, at most 2,097,152 bytes.
 
@@ -83,7 +85,7 @@ Every error body is `{"detail": "<message>"}`, and `detail` says what was wrong.
 
 | status | cause | what to do |
 | --- | --- | --- |
-| 400 | invalid JSON, a missing or `null` `state`, no `questions` object, or a `model` that names another Laya model | Fix the request. |
+| 400 | invalid JSON, a missing or `null` `state`, no `questions` object, or a recognized `model` name or repo id for another checkpoint, as described above | Fix the request. |
 | 401 | the server has an API key, and the request sent no `Authorization: Bearer <key>` or a wrong one | Send the key. |
 | 408 | the body took over 10 s to arrive | Send it again. |
 | 413 | the body, the state, the questions or the options went over a limit | Split the request or shorten the state. |
@@ -150,9 +152,16 @@ A program can also start its own server on a free port and read the address from
 
 ```python
 import json
+import os
 import subprocess
 
-proc = subprocess.Popen(["sys1rust", "serve", "--port", "0"], stdout=subprocess.PIPE, text=True)
+env = os.environ.copy()
+for name in ("LAYA_API_KEY", "SYS1_REVISION"):
+    env.pop(name, None)
+proc = subprocess.Popen(
+    ["sys1rust", "serve", "--host", "127.0.0.1", "--model", "typed-decisions", "--port", "0"],
+    env=env, stdout=subprocess.PIPE, text=True,
+)
 try:
     line = proc.stdout.readline()
     if not line:
@@ -169,11 +178,11 @@ finally:
         proc.wait()
 ```
 
-The `finally` block stops the server even when the start or a request fails, so no server is left holding the GPU. If `serve` fails, it prints the error on stderr and exits without the ready line, so `readline()` returns an empty string. A server already running on the Mac shares the GPU with this one, so prefer one server per Mac.
+This example selects typed-decisions on `127.0.0.1` without authentication and clears an inherited revision for the child process. The parent keeps its settings. The `finally` block stops the server even when the start or a request fails, so no server is left holding the GPU. If `serve` fails, it prints the error on stderr and exits without the ready line, so `readline()` returns an empty string. A server already running on the Mac shares the GPU with this one, so prefer one server per Mac.
 
 ## Models
 
-One server runs one model, `typed-decisions` unless `--model` says otherwise.
+One server runs one model, `typed-decisions` unless `--model` or `SYS1_MODEL` selects another.
 
 | `--model` | Hugging Face repo | encoder | download |
 | --- | --- | --- | --- |
