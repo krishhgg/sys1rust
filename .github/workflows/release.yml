@@ -77,7 +77,6 @@ jobs:
       matrix:
         include:
           # macos-15 runs the macOS 14 bundle on an OS older than 26.2, the case that bundle exists for.
-          # There is no macos-14 leg. GitHub retires that image on 2026-11-02 (actions/runner-images#13518).
           - { runner: macos-15, flavor: macos14 }
           - { runner: macos-26, flavor: macos26 }
     runs-on: ${{ matrix.runner }}
@@ -165,15 +164,16 @@ jobs:
         run: |
           tag=$GITHUB_REF_NAME
           # gh release create makes a draft, uploads the files and then publishes the draft, so a
-          # cancelled attempt can leave a draft behind. No user can see a draft, and gh release
-          # create does not reuse one. Delete every draft of this tag and create the release again.
-          # The deletes go by id, so they never hit a published release. The git tag stays.
+          # cancelled attempt can leave a draft behind, and gh release create would add a second
+          # one. The job stops on a draft of this tag and leaves it to a maintainer. Deleting it
+          # here could remove a live release if someone publishes the draft in between.
           drafts=$(gh api "repos/$GH_REPO/releases" --paginate \
-            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id")
-          for id in $drafts; do
-            echo "Deleting draft release $id of $tag, which an earlier attempt left"
-            gh api -X DELETE "repos/$GH_REPO/releases/$id"
-          done
+            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .html_url" |
+            paste -sd ' ' -)
+          if [ -n "$drafts" ]; then
+            echo "::error::Release $tag has a draft that an earlier attempt left: $drafts. Delete it on the Releases page (or \`gh release delete $tag\` after checking it is still a draft), then rerun the publish job."
+            exit 1
+          fi
           # This endpoint finds only a published release. A rerun goes on with it only if it has
           # both bundles and the SHA256SUMS of this run, so the formula's hashes match what users
           # download.
