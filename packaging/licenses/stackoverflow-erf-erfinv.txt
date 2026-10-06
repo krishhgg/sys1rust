@@ -1,0 +1,25 @@
+erf and erfinv by njuffa (Norbert Juffa) on Stack Overflow, adapted in MLX 0.32.2 as
+mlx/backend/metal/kernels/erf.h and as the erfinv in mlx/backend/cpu/simd/math.h, in
+lib/mlx.metallib and lib/libmlx.dylib, which also keeps them as source
+Source: https://github.com/ml-explore/mlx/blob/1f8e74e3f12f31365464a6867c6579f0e9b29d85/mlx/backend/metal/kernels/erf.h
+MLX cites the erf answer only. Its erfinv constants match the second answer below.
+
+erf is my_erff from the answer by njuffa (https://stackoverflow.com/users/780717/njuffa) to
+"Efficient faithfully-rounded implementation of error function erff()",
+https://stackoverflow.com/a/35148199. MLX's constants match revision 4 of 2022-06-18,
+https://stackoverflow.com/revisions/35148199/4.
+
+erfinv is my_erfinvf from the answer by njuffa to "Inverse Error Function in C",
+https://stackoverflow.com/a/49743348. MLX's constants match revision 3 of 2021-06-10,
+https://stackoverflow.com/revisions/49743348/3.
+
+Stack Overflow licenses both revisions under the Creative Commons Attribution-ShareAlike 4.0
+International License (CC BY-SA 4.0), https://creativecommons.org/licenses/by-sa/4.0/legalcode.
+Neither answer carries a license of its own.
+
+MLX modified both. It ported them from C to Metal and to its C++ SIMD types, computes erf's tail
+as -expm1f(r) in place of the answer's expf or expm1f paths, calls the platform log in erfinv and
+drops the answers' helper functions.
+
+The licensor offers this material as-is and makes no warranties, as Section 5 of CC BY-SA 4.0
+states.

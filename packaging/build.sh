@@ -13,12 +13,14 @@ rpaths_of() {
   otool -l "$1" | awk '/cmd LC_RPATH/ {getline; getline; sub(/^ *path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print}'
 }
 
-# Third-party code that MLX 0.32.2 compiles into lib/ and whose license asks for its notice in
-# binary copies. packaging/licenses/NOTICE describes each one. fmt 12.1.0 (MIT with an exception
-# for object code) and ThreadPool (zlib, notice for source copies only) need none.
+# Third-party code that MLX 0.32.2 builds into lib/, as is or adapted, and whose license asks for
+# its notice or attribution in lib/'s copies. packaging/licenses/NOTICE describes each one and,
+# at its end, what needs none.
 MLX_THIRD_PARTY=(nlohmann-json-3.11.3.txt gguf-tools-8fa6eb6.txt fp16-ba1d31f.txt metal-cpp-26.txt
   pocketfft-mlx-0.32.2.txt v8-small-vector-mlx-0.32.2.txt expm1f-mlx-0.32.2.txt
-  thrust-cexpf-mlx-0.32.2.txt)
+  thrust-cexpf-mlx-0.32.2.txt stackoverflow-erf-erfinv.txt pytorch-e3643e1.txt
+  supervised-lda-fe3a39b.txt simd-utils-3c1433a.txt fastermath-2ed806f.txt numpy-1d49c7f.txt
+  tensorflow-2a59109.txt jax-5942e15.txt)
 
 FLAVOR=${1:-}
 OUT_ARG=${2:-}
