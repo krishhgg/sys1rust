@@ -13,14 +13,18 @@ sys1rust runs Laya's System 1 decision models on an Apple silicon Mac's GPU, in 
 A request like "set up sys1rust on my Mac" goes to the setup skill. If you are reading this on GitHub and have no clone, make a scratch one first, outside any project of the user's:
 
 ```sh
-dir="${TMPDIR:-/tmp}/sys1rust"
-if [ -d "$dir/.git" ]; then git -C "$dir" pull --ff-only; else git clone --depth 1 https://github.com/krishhgg/sys1rust "$dir"; fi
-cd "$dir"
+dir=$(mktemp -d "${TMPDIR:-/tmp}/sys1rust-agent.XXXXXX")
+if xcode-select -p >/dev/null 2>&1 && git --version >/dev/null 2>&1; then
+  git clone --depth 1 https://github.com/krishhgg/sys1rust "$dir"
+else
+  curl -fsSL -o "$dir/source.tar.gz" https://codeload.github.com/krishhgg/sys1rust/tar.gz/refs/heads/main &&
+    tar -xzf "$dir/source.tar.gz" --strip-components 1 -C "$dir" && rm "$dir/source.tar.gz"
+fi && cd "$dir"
 ```
 
-The installed sys1rust doesn't need the clone afterwards. If `git` is missing, read the setup skill at `https://raw.githubusercontent.com/krishhgg/sys1rust/main/.agents/skills/sys1rust-setup/SKILL.md` and use its commands for running without a clone.
+On a new Mac, `git` can be a stub that asks the user to install Apple's command line tools. The block runs `git` only after `xcode-select -p` finds those tools, and otherwise downloads the same files as a tarball with `curl`. Don't install the command line tools for this. The block enters the folder only when the download worked. If it fails, show the user its error and stop. The installed sys1rust doesn't need the folder afterwards.
 
-Agents that support skills also find these 3 files as the skills `sys1rust-setup`, `sys1rust-use` and `sys1rust-develop`. Codex, Cursor and GitHub Copilot read `.agents/skills/`, and Claude Code reads the links to them in `.claude/skills/`. Without skill support, open the file and follow it. Edit the skills only in `.agents/skills/`.
+Agents that support skills also find these 3 files as the skills `sys1rust-setup`, `sys1rust-use` and `sys1rust-develop`. Codex, [Cursor](https://cursor.com/docs/skills) and [GitHub Copilot](https://docs.github.com/en/copilot/concepts/agents/about-agent-skills) read `.agents/skills/`, and Claude Code reads the links to them in `.claude/skills/`. Without skill support, open the file and follow it. Edit the skills only in `.agents/skills/`.
 
 ## Rules for every agent
 

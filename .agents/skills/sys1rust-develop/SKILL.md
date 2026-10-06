@@ -45,14 +45,17 @@ Run the suites in this order, and stop at the first failure.
    ```
 3. The ignored suites, which load models on the GPU. Run each alone:
    ```sh
+   (
+   set -e
    for t in settings loading reference; do
      SYS1_TEST_ALL_CHECKPOINTS=1 cargo test --release --manifest-path runtime/Cargo.toml \
        -p laya-mlx --test $t -- --ignored --test-threads 1
    done
    cargo test --release --manifest-path runtime/Cargo.toml -p sys1rust --test live -- --ignored
    cargo test --release --manifest-path runtime/Cargo.toml -p sys1rust --test live_pull -- --ignored
+   )
    ```
-   - `settings` checks every engine setting bit for bit against the plain path and takes about 14 minutes with all 3 models. `reference` checks the answers against `bench/reference`. `live` starts the real binary and requires each reply to equal an in-process prediction byte for byte. `live_pull` downloads typed-decisions (846 MB) into an empty cache, so it needs the network.
+   - `settings` takes about 14 minutes with all 3 models. Its exact cases, including `fuserope` alone, `band`, `nax` and the loading settings, require identical answer JSON and raw logits and pooled outputs under `f32::to_bits`. The `dense_upto`, `headprune`, `unpad`, their combinations and boolean-mask cases require the same chosen answers and allow probability, answer-confidence and action-probability differences up to 0.001. `reference` checks the answers against `bench/reference`. `live` starts the real binary and requires each reply to equal an in-process prediction byte for byte. `live_pull` downloads typed-decisions (846 MB) into an empty cache, so it needs the network.
    - The laya-mlx suites load the snapshot that a model's `refs/main` names, or else its only snapshot, and `sys1rust pull` writes no `refs/main`. Point `HF_HUB_CACHE` at a cache that holds only the pinned snapshots, filled with `sys1rust pull <model>` for each of the 3 models. Step 3 of `packaging/RELEASE.md` sets one up.
    - Without `SYS1_TEST_ALL_CHECKPOINTS=1`, a model missing from the cache is skipped with a note.
    - The `settings` tests need MLX's NAX gemms, so they pass only on an M5-class GPU (generation 17 or later) with macOS 26.2 or later and the macOS 26 MLX build.
@@ -62,7 +65,7 @@ Run the suites in this order, and stop at the first failure.
 
 - **One GPU job at a time.** A running `sys1rust serve`, the laya-mlx tests, the live tests, `sys1-probe` and the benchmarks all use the GPU. Run each with nothing else on the GPU, and stop any server you started before the next job. 2 jobs at once slow each other and make every timing worthless.
 - **Format only your own lines.** The workspace isn't rustfmt-clean, so `cargo fmt` rewrites files you didn't touch. Never run it on the whole workspace. Check a new file with `rustfmt --edition 2021 --check <file>`, which also checks the modules a `lib.rs` or `main.rs` declares. In an existing file, keep your lines in rustfmt's style and leave the rest alone.
-- **Answers must not change.** A speed change must give bit-identical results to the current default. The answer JSON must match, and the raw outputs must be equal under `f32::to_bits`, as `tests/settings.rs` checks for each setting. Add such a test for a new setting, and make it fail if a kernel fell back to MLX's ops without saying so. A change that is meant to change numbers must say how it was checked against `bench/reference`. The correctness workload agrees with upstream on 1,498 of 1,500 answers today, and 99% is the floor. `sys1-probe --ab SPEC_A SPEC_B --check` compares 2 settings' answers.
+- **Answers must not change.** A new speed change must give bit-identical results to the current default. Require identical answer JSON and raw outputs under `f32::to_bits`, using an exact case in `tests/settings.rs`. Add such a test for a new setting, and make it fail if a kernel fell back to MLX's ops without saying so. Some existing work-reduction and boolean-mask cases use the 0.001 tolerance described above. Their passing tests do not prove bit identity. A change that is meant to change numbers must say how it was checked against `bench/reference`. The correctness workload agrees with upstream on 1,498 of 1,500 answers today, and 99% is the floor. `sys1-probe --ab SPEC_A SPEC_B --check` compares 2 settings' answers.
 - **Kernels fall back.** A custom kernel that can't build or run on a Mac must be found at model load, with a line on stderr, and the MLX path it replaces stays behind a setting. It never fails in the middle of a request.
 - **The server matches `laya serve`.** Status codes, `detail` strings, header names, response key order and request limits match upstream. Document an intentional difference in the code and in the README's "Differences from `laya serve`".
 - **Speed claims need measurements.** Name the machine, the macOS version, the MLX build, the model, the request shapes, the number of runs and processes, and report medians. Compare against a baseline measured in the same session. `sys1-probe --ab` alternates the 2 settings in one process, because separate runs on one Mac vary by about 5%. Write the result up in `results/`, as `results/SPEED.md` does. 1 run proves nothing.

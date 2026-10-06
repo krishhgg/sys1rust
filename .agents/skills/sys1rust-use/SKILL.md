@@ -33,14 +33,14 @@ A running server answers 200 with `"status":"ok"` and names its model in `loaded
 }
 ```
 
-- `state` is required. It is the text to judge, as a string or any other JSON value, up to 50,000 characters. A value that isn't a string counts as the length of Python's `str()` of it.
+- `state` is required. It is the text to judge, as a string or any other JSON value except `null`, up to 50,000 characters. A missing or `null` state gets 400 `'state' is required`. A value that isn't a string counts as the length of Python's `str()` of it.
 - `questions` is required. It maps each question id to a question, up to 64 of them. Every question needs `type` and `instructions`:
   - `choice` takes `criteria` as an object of label to description, or as a list of labels, up to 100 options.
   - `score` takes `criteria` as a list of level descriptions, level 0 first, up to 32 levels.
   - `noul` is a yes or no question. Its `criteria` is optional, an object with a `"true"` description, a `"false"` one or both.
   - All the questions together take at most 512 options.
-- `model` is optional. Leave it out. A name of a Laya model other than the one the server runs gets 400.
-- `max_len` and `head_max_len` get 422, because sys1rust doesn't support them.
+- `model` is optional. Leave it out. A name or repo id of a Laya model other than the one the server runs gets 400. The server ignores any other value, `null` included.
+- `max_len` and `head_max_len` get 422 when they hold any value but `null`, because sys1rust doesn't support them. Absent or `null`, they are ignored.
 - The body must be standard JSON in UTF-8, at most 2,097,152 bytes.
 
 Put every question about one state into one request. They run through the model together, one row per question, which costs less than separate requests.
@@ -83,11 +83,11 @@ Every error body is `{"detail": "<message>"}`, and `detail` says what was wrong.
 
 | status | cause | what to do |
 | --- | --- | --- |
-| 400 | invalid JSON, no `state`, no `questions` object, or a `model` that names another Laya model | Fix the request. |
+| 400 | invalid JSON, a missing or `null` `state`, no `questions` object, or a `model` that names another Laya model | Fix the request. |
 | 401 | the server has an API key, and the request sent no `Authorization: Bearer <key>` or a wrong one | Send the key. |
 | 408 | the body took over 10 s to arrive | Send it again. |
 | 413 | the body, the state, the questions or the options went over a limit | Split the request or shorten the state. |
-| 422 | a malformed question, such as a `choice` without `criteria`, or `max_len` or `head_max_len` | Fix the question that `detail` names. |
+| 422 | a malformed question, such as a `choice` without `criteria`, or a `max_len` or `head_max_len` that isn't `null` | Fix what `detail` names. |
 | 503 with `Retry-After: 1` | the server already holds as many requests as `--max-concurrent` allows, 16 by default | Wait 1 s and retry. |
 | 503 without `Retry-After` | the inference thread stopped | Restart the server. |
 | 500 | inference failed | Read the server's log. |
@@ -153,14 +153,23 @@ import json
 import subprocess
 
 proc = subprocess.Popen(["sys1rust", "serve", "--port", "0"], stdout=subprocess.PIPE, text=True)
-ready = json.loads(proc.stdout.readline())  # {"event": "listening", "addr": "127.0.0.1:<port>", ...}
-URL = f"http://{ready['addr']}/v1/systemone"
-# ... call ask() as above ...
-proc.terminate()  # SIGTERM lets requests in flight finish before it exits
-proc.wait()
+try:
+    line = proc.stdout.readline()
+    if not line:
+        raise RuntimeError(f"sys1rust serve exited with code {proc.wait()}, see its stderr")
+    ready = json.loads(line)  # {"event": "listening", "addr": "127.0.0.1:<port>", ...}
+    URL = f"http://{ready['addr']}/v1/systemone"
+    # ... call ask() as above ...
+finally:
+    proc.terminate()  # SIGTERM lets requests in flight finish before it exits
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
 ```
 
-If `serve` fails, it prints the error on stderr and exits without that line, so `readline()` returns an empty string. A server already running on the Mac shares the GPU with this one, so prefer one server per Mac.
+The `finally` block stops the server even when the start or a request fails, so no server is left holding the GPU. If `serve` fails, it prints the error on stderr and exits without the ready line, so `readline()` returns an empty string. A server already running on the Mac shares the GPU with this one, so prefer one server per Mac.
 
 ## Models
 
