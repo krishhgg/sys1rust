@@ -135,7 +135,7 @@ export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os
 cargo build --release --manifest-path runtime/Cargo.toml
 ```
 
-Then run `runtime/target/release/sys1rust serve`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is.
+Then run `runtime/target/release/sys1rust serve`. Where this README runs `sys1rust`, use that path, or add `runtime/target/release` to your `PATH`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is.
 
 ## More
 
