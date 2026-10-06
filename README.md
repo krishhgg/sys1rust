@@ -21,7 +21,15 @@
 
 ## Install
 
-To install on an Apple silicon Mac with macOS 14 or later, run:
+Paste this line into Claude Code, Codex, Cursor or another coding agent:
+
+```text
+Set up sys1rust on my Mac from https://github.com/krishhgg/sys1rust
+```
+
+The agent clones this repository and follows [`AGENTS.md`](AGENTS.md), which has it check your Mac, run `install.sh`, download the model, start the server and send it a test request.
+
+To install it yourself on an Apple silicon Mac with macOS 14 or later, run:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh
@@ -135,7 +143,7 @@ export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os
 cargo build --release --manifest-path runtime/Cargo.toml
 ```
 
-Then run `runtime/target/release/sys1rust serve`. Where this README runs `sys1rust`, use that path, or add `runtime/target/release` to your `PATH`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is.
+Then run `runtime/target/release/sys1rust serve`. Where this README runs `sys1rust`, use that path, or add `runtime/target/release` to your `PATH`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is. To change the code and run the tests, follow [`.agents/skills/sys1rust-develop/SKILL.md`](.agents/skills/sys1rust-develop/SKILL.md).
 
 ## More
 
@@ -216,6 +224,7 @@ $CARGO_TARGET_DIR/release/sys1rust serve --model typed-decisions --port 8000
 <summary><strong>Repository layout</strong></summary>
 
 - `install.sh`: the installer for prebuilt releases.
+- `AGENTS.md`, `CLAUDE.md` and `.agents/skills/`: instructions for coding agents that set up, call or change sys1rust.
 - `runtime/`: the Rust workspace.
   - `laya-core`: request parsing, tokenization, sequence layout and answer decoding, with no GPU code.
   - `laya-mlx`: the forward pass on MLX through mlx-rs.
