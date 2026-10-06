@@ -1,4 +1,4 @@
-# On a v* tag, build both bundles, smoke-test them on macOS 14, 15 and 26 runners, publish the
+# On a v* tag, build both bundles, smoke-test them on macOS 15 and 26 runners, publish the
 # GitHub release and update Formula/sys1rust.rb in krishhgg/homebrew-tap. A vX.Y.Z-rcN tag
 # publishes a prerelease and leaves the tap alone. packaging/RELEASE.md is the checklist.
 # A pull request that changes packaging/ or this file runs the build and smoke jobs only.
@@ -76,8 +76,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # GitHub retires the macos-14 image on 2026-11-02 (actions/runner-images#13518).
-          - { runner: macos-14, flavor: macos14 }
+          # macos-15 runs the macOS 14 bundle on an OS older than 26.2, the case that bundle exists for.
+          # There is no macos-14 leg. GitHub retires that image on 2026-11-02 (actions/runner-images#13518).
           - { runner: macos-15, flavor: macos14 }
           - { runner: macos-26, flavor: macos26 }
     runs-on: ${{ matrix.runner }}
@@ -115,6 +115,12 @@ jobs:
     needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Every tag's publish job joins this one group, so 2 tags never write the tap at the same
+    # time. GitHub runs 1 job of a group and holds 1 more. A third tag's job cancels the held
+    # one, and that tag's publish job then needs a rerun.
+    concurrency:
+      group: tap-update
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -130,7 +136,7 @@ jobs:
           path: dist
       - name: Checksums
         run: cd dist && sha256sum sys1rust-*.tar.gz > SHA256SUMS && cat SHA256SUMS
-      - name: Clone the Homebrew tap
+      - name: Clone the Homebrew tap and check that TAP_TOKEN can push to it
         if: ${{ !contains(github.ref_name, '-rc') }}
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
@@ -141,26 +147,45 @@ jobs:
           fi
           # Git asks this credential helper for the password, and the helper reads TAP_TOKEN from
           # the environment. The token stays out of the clone URL, .git/config, every command line
-          # and the log. The empty helper first drops any helper the runner set up. The clone runs
-          # before the release exists, so an expired token stops the job before anything is published.
+          # and the log. The empty helper first drops any helper the runner set up.
           # shellcheck disable=SC2016
           git clone --depth 1 -c credential.helper= \
             -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$TAP_TOKEN"; }; f' \
             https://github.com/krishhgg/homebrew-tap.git "$RUNNER_TEMP/tap"
+          # The tap is public, so the clone runs without the token. A dry-run push asks GitHub for
+          # git-receive-pack, the service behind every push, and GitHub serves it only to a token
+          # that it accepts and that has push access to the tap. An expired, revoked or read-only
+          # token therefore stops the job here, before the release exists. The dry run sends no
+          # commits, so it does not check branch rules on main. Unlike HEAD, --all also works on
+          # a tap with no commits.
+          git -C "$RUNNER_TEMP/tap" push --dry-run --all origin
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag=$GITHUB_REF_NAME
-          # A rerun of this job finds the release that the first attempt made. It goes on only if
-          # the release holds these same bundles, so the formula's hashes match what users download.
-          if gh release view "$tag" > /dev/null 2>&1; then
-            gh release download "$tag" --pattern SHA256SUMS --output "$RUNNER_TEMP/SHA256SUMS.published"
-            if ! cmp -s dist/SHA256SUMS "$RUNNER_TEMP/SHA256SUMS.published"; then
-              echo "::error::Release $tag already has other bundles. Rerun only the failed jobs, or delete the release first."
+          # gh release create makes a draft, uploads the files and then publishes the draft, so a
+          # cancelled attempt can leave a draft behind. No user can see a draft, and gh release
+          # create does not reuse one. Delete every draft of this tag and create the release again.
+          # The deletes go by id, so they never hit a published release. The git tag stays.
+          drafts=$(gh api "repos/$GH_REPO/releases" --paginate \
+            --jq ".[] | select(.draft and .tag_name == \"$tag\") | .id")
+          for id in $drafts; do
+            echo "Deleting draft release $id of $tag, which an earlier attempt left"
+            gh api -X DELETE "repos/$GH_REPO/releases/$id"
+          done
+          # This endpoint finds only a published release. A rerun goes on with it only if it has
+          # both bundles and the SHA256SUMS of this run, so the formula's hashes match what users
+          # download.
+          if gh api "repos/$GH_REPO/releases/tags/$tag" --silent 2> /dev/null; then
+            pub=$RUNNER_TEMP/published
+            if ! gh release download "$tag" --dir "$pub" --pattern 'sys1rust-*.tar.gz' --pattern SHA256SUMS ||
+              ! cmp -s dist/SHA256SUMS "$pub/SHA256SUMS" ||
+              ! (cd "$pub" && sha256sum --quiet --check SHA256SUMS); then
+              echo "::error::Release $tag is published with other files than this run built. Rerun only the failed jobs, or delete the release first."
               exit 1
             fi
-            echo "Release $tag already has these bundles"
+            echo "Release $tag is published with these bundles and SHA256SUMS"
             exit 0
           fi
           flags=()
@@ -173,10 +198,24 @@ jobs:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
           version=${GITHUB_REF_NAME#v}
+          formula=$RUNNER_TEMP/tap/Formula/sys1rust.rb
+          # A rerun of an older tag's publish job must not put its formula over a newer one. The
+          # tap-update group keeps a second tag's job from changing the tap after the clone.
+          if [ -f "$formula" ]; then
+            current=$(sed -n 's/^ *version "\(.*\)"$/\1/p' "$formula")
+            if ! [[ $current =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::The tap's Formula/sys1rust.rb needs 1 version line with an X.Y.Z version, and it has '$current'."
+              exit 1
+            fi
+            if [ "$current" != "$version" ] &&
+              [ "$(printf '%s\n' "$current" "$version" | sort -V | tail -n 1)" = "$current" ]; then
+              echo "::notice::The tap has sys1rust $current, which is newer than $version, so the tap stays as it is. Release $GITHUB_REF_NAME is published."
+              exit 0
+            fi
+          fi
           sha() { awk -v f="sys1rust-$version-$1-arm64.tar.gz" '$2 == f {print $1}' dist/SHA256SUMS; }
           mkdir -p "$RUNNER_TEMP/tap/Formula"
-          packaging/render_formula.sh "$GITHUB_REF_NAME" "$(sha macos26)" "$(sha macos14)" \
-            > "$RUNNER_TEMP/tap/Formula/sys1rust.rb"
+          packaging/render_formula.sh "$GITHUB_REF_NAME" "$(sha macos26)" "$(sha macos14)" > "$formula"
           cd "$RUNNER_TEMP/tap"
           git add Formula/sys1rust.rb
           # A rerun after a successful push finds the formula unchanged. That is the wanted state,
