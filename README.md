@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/speed.svg" alt="Laya's System 1 decisions in 15.5 ms on an M5 Mac, up to 4.1x faster than laya serve. Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. Ten questions over 512 tokens: 379, 430 and 708 ms." width="880">
+  <img src="docs/assets/speed.svg" alt="Laya's System 1 decisions in 15.5 ms on an M5 Mac, up to 4.1x faster than laya serve. Median time per request for the typed-decisions model on a base M5. One question over a 128-token state: sys1rust 15.5 ms, Python laya-mlx 19.0 ms, stock laya serve 53.9 ms. One question over 512 tokens: 37.9, 47.6 and 157.6 ms. 10 questions over 512 tokens: 379, 430 and 708 ms." width="880">
 </p>
 
 <p align="center">
@@ -7,9 +7,9 @@
 </p>
 
 <p align="center">
+  <a href="#install"><strong>Install</strong></a> ·
   <a href="#speed"><strong>Speed</strong></a> ·
-  <a href="results/README.md"><strong>Results</strong></a> ·
-  <a href="#build"><strong>Build</strong></a>
+  <a href="results/README.md"><strong>Results</strong></a>
 </p>
 
 <p align="center">
@@ -19,30 +19,34 @@
   <img alt="No Python at run time" src="https://img.shields.io/badge/Python_at_run_time-none-BF6A2B?style=flat-square">
 </p>
 
-## Build
+## Install
 
-There is no release yet, so build it from source. You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python only fetches MLX. `sys1rust` doesn't run it.
+On an Apple silicon Mac with macOS 14 or later:
 
 ```sh
-# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files).
-python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2
-export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os.path.dirname(mlx.core.__file__))')"
-
-# The binaries go to runtime/target/release/.
-cargo build --release --manifest-path runtime/Cargo.toml
+brew install krishhgg/tap/sys1rust
+sys1rust serve
 ```
 
-The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is. A self-contained release is the next step.
+The first `serve` downloads the typed-decisions model (846 MB) into the Hugging Face cache, then prints `listening on http://127.0.0.1:8000` when it's ready. `sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. To run it in the background now and at every login, first stop the foreground server with Ctrl-C to free port 8000, then run:
+
+```sh
+brew services start sys1rust
+```
+
+It logs to `$(brew --prefix)/var/log/sys1rust.log`. On macOS 26.2 or later, Homebrew installs the bundle with MLX's build for that version, which is about 3x faster on the M5 than the bundle for macOS 14 to 26.1. The speed numbers in this README use the macOS 26 build.
+
+Without Homebrew, download a tarball from [Releases](https://github.com/krishhgg/sys1rust/releases). `sys1rust-<version>-macos26-arm64.tar.gz` needs macOS 26.2 or later, and the `macos14` tarball runs on macOS 14 to 26.1. Unpack it, then clear the quarantine flag the browser set. The release signs the binary ad hoc without notarizing it, so macOS refuses to run it while the flag is set:
+
+```sh
+xattr -dr com.apple.quarantine sys1rust-*
+```
+
+Then run `bin/sys1rust serve` from the unpacked folder. The binary loads MLX from the `lib/` folder next to `bin/`, so keep the folder together. To run it as `sys1rust`, add that `bin/` to your `PATH` or symlink `bin/sys1rust` into a directory on it. A symlink still finds `lib/`.
 
 ## Try it
 
-Start the server. The first start downloads the typed-decisions model (846 MB) into the Hugging Face cache:
-
-```sh
-runtime/target/release/sys1rust serve --port 8000
-```
-
-It prints `listening on http://127.0.0.1:8000` when it's ready. In another terminal:
+With the server from [Install](#install) running, in the foreground or under `brew services`, send it a request from another terminal:
 
 ```sh
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -58,12 +62,12 @@ curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
 ```
 
 <p align="center">
-  <img src="docs/assets/request-answer.svg" alt="An app sends sys1rust a support message and three questions: which team should handle it, how urgent it is, and whether money is involved. sys1rust answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
+  <img src="docs/assets/request-answer.svg" alt="An app sends sys1rust a support message and 3 questions about which team should handle it, how urgent it is, and whether money is involved. sys1rust answers billing with probability 0.79, urgency 2.54 on a scale of 0 to 3, and money involved with probability 0.73, in 13 ms of inference on a base M5, with the model on the GPU and no Python." width="880">
 </p>
 
 On the base M5, inference for this request took 13.0 to 13.3 ms over 18 runs, 6 in each of 3 fresh processes after 2 warm-up requests. That is the `X-Inference-Time-Ms` header, which `curl -si` shows. It covers tokenizing, running the model and decoding. It leaves out reading and checking the request, waiting for the GPU and writing the reply.
 
-Each question gets one of three answer types:
+Each question gets one of 3 answer types:
 
 | type | you give | you get back |
 | --- | --- | --- |
@@ -71,24 +75,24 @@ Each question gets one of three answer types:
 | `score` | an ordered list of levels | `score`, the expected level (it can fall between levels), `probabilities` per level, and a `legend` |
 | `noul` | only the instructions | `noul`, the probability that the answer is yes |
 
-Every answer also has two confidence numbers, which measure different things:
+Every answer also has 2 confidence numbers, which measure different things:
 
-- `answer_confidence` is the probability of the answer given. It is the one to use for deciding whether to trust an answer.
-- For `choice` and `score`, `confidence` is 1 minus the normalized entropy of the probabilities. It is 0 for an even split and 1 when everything is on one option. For `noul`, it equals `answer_confidence`: the larger of the yes and no probabilities, which is 0.5 for an even split.
+- `answer_confidence` is the probability of the most likely option. For `choice` that is the chosen label, for `score` the most likely level, which can differ from the expected `score`, and for `noul` the larger of yes and no. It is the one to use for deciding whether to trust an answer.
+- For `choice` and `score`, `confidence` is 1 minus the normalized entropy of the probabilities. It is 0 for an even split and 1 when everything is on one option. For `noul`, it equals `answer_confidence`, which is 0.5 for an even split.
 
-Don't compare the two against the same threshold. `action.act_probability` comes from a second output of the model: its probability for acting on the answer rather than escalating. Ctrl-C stops the server, and when it stops, the model is out of memory.
+Don't compare them against the same threshold. `action.act_probability` is the model's probability, from a second output, for acting on the answer rather than escalating. Ctrl-C stops a foreground server, and `brew services stop sys1rust` stops the background one. When the server stops, the model is out of memory.
 
 ## How it works
 
 <p align="center">
-  <img src="docs/assets/how-it-works.svg" alt="Your app sends POST /v1/systemone to sys1rust, one process on 127.0.0.1:8000 with no Python. sys1rust checks the API key, takes one of 16 slots, checks the body, encodes the state with one row per question, runs the model on the GPU through MLX one request at a time, and decodes the probabilities into answers, which go back to your app. The model weights come from the local Hugging Face cache and are read once at start." width="880">
+  <img src="docs/assets/how-it-works.svg" alt="Your app sends POST /v1/systemone to sys1rust, one process on 127.0.0.1:8000 with no Python. sys1rust checks the API key, takes one of 16 slots, checks the body, encodes the state with one row per question, runs the model on the GPU through MLX one request at a time, and decodes the probabilities into answers, which go back to your app. sys1rust reads the model weights from the local Hugging Face cache once, at start." width="880">
 </p>
 
 - **It checks requests the way `laya serve` does**, with the same limits, error codes and `detail` strings. It checks the API key first, then takes a slot, then reads and checks the body.
-- **The GPU runs one request at a time.** `sys1rust` holds up to 16 requests (`LAYA_MAX_CONCURRENT`), one running and the rest waiting their turn. A request that arrives while all 16 slots are held gets `503` with `Retry-After: 1` at once, so clients must retry it. More clients don't get more throughput, since one request already fills the GPU.
+- **The GPU runs one request at a time.** `sys1rust` holds up to 16 requests (`LAYA_MAX_CONCURRENT`), one running and the rest waiting their turn. A request that arrives while all 16 slots are in use gets `503` with `Retry-After: 1` at once, so clients must retry it. More clients don't get more throughput, since one request already fills the GPU.
 - **All the questions in a request go through the model together**, one row per question, in fp16.
 - **It beats Python MLX by doing less work and tuning its matmuls, not by being Rust.** It skips computing on padding, runs the decision head's last layer only at the positions the answer reads, uses dense attention where that is cheaper, and from 512 tokens computes local attention only over the keys each window reaches. Its matmuls run MLX's own kernels for the M5's matrix units, with tile sizes tuned on this M5. The answers don't change.
-- **It downloads a model once, at a pinned revision.** The first `sys1rust serve` fetches the five files the model needs (846 MB for typed-decisions) into the Hugging Face cache and checks each one's hash. Later starts read them from there. `--offline` turns downloads off.
+- **It downloads a model once, at a pinned revision.** The first `sys1rust serve` fetches the 5 files the model needs (846 MB for typed-decisions) into the Hugging Face cache and checks each one's hash. Later starts read them from there. `--offline` turns downloads off.
 
 ## Speed
 
@@ -100,13 +104,13 @@ Median time per request for the typed-decisions model on a base M5, in ms. These
 | laya-mlx, Python MLX at its fastest (compiled, buffer cache capped) | 19.0 | 47.6 | 430 |
 | `laya serve`, stock, over HTTP | 53.9 | 157.6 | 708 |
 
-- **Against stock `laya serve`**, it is 1.9 to 4.1x faster per request, counting `sys1rust`'s 0.3 ms of HTTP. The `laya serve` times come from the bake-off ([`REPORT.md`](results/REPORT.md)), an earlier session than the round 3 sys1rust times, and separate runs on this laptop vary by about 5%. In earlier runs, `sys1rust` sustained 7.9 requests/s over 5 minutes, and `laya serve` 3.54 over 2 minutes. `laya serve` runs fp32 for requests with fewer than 5 questions, but even upstream in fp16, which it doesn't ship, is 1.9 to 2.9x slower on these three sizes, also against times from an earlier session.
+- **Against stock `laya serve`**, it is 1.9 to 4.1x faster per request, counting `sys1rust`'s 0.3 ms of HTTP. The `laya serve` times come from the bake-off ([`REPORT.md`](results/REPORT.md)), an earlier session than the round 3 sys1rust times, and separate runs on this laptop vary by about 5%. In earlier runs, `sys1rust` sustained 7.9 requests/s over 5 minutes, and `laya serve` 3.54 over 2 minutes. `laya serve` runs fp32 for requests with fewer than 5 questions, but even upstream in fp16, which it doesn't ship, is 1.9 to 2.9x slower on these 3 sizes, also against times from an earlier session.
 - **Against Python laya-mlx at its fastest**, it is 1.25x faster, and faster on all 12 benchmark sizes, by 13 to 55%.
-- **It gives the same answers.** On the 1,500-answer correctness workload, 1,498 agree with the upstream PyTorch fp32 reference (99.9%, above the 99% gate). The two that differ are near ties.
+- **It gives the same answers.** On the 1,500-answer correctness workload, 1,498 agree with the upstream PyTorch fp32 reference (99.9%, above the 99% gate). The 2 that differ are near ties.
 - **Its tail stays close to the median.** In the timing runs, no request took more than twice the median for its size. Python MLX without a capped cache had 9% of requests over that line.
 - **It starts fast and is small.** From process start to the first answer takes 243 to 375 ms, with the model files already in the OS file cache. `sys1rust` is a 7 MB binary, and its HTTP layer adds 0.3 ms per request. macOS caches the compiled GPU kernels by the binary's path and the kernel source, so the first start from a new path or after a kernel change takes about 1.7 s longer.
 
-Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on macOS 26.2 and wall power. Other chips are untested. The write-ups are in [`results/`](results/README.md). They run from the bake-off of 13 existing runtimes ([`REPORT.md`](results/REPORT.md)) to the speed round ([`SPEED.md`](results/SPEED.md)).
+All these measurements come from one Mac, a MacBook Pro 14 with a base M5, on macOS 26.2 and wall power. Other chips are untested. The write-ups are in [`results/`](results/README.md). They run from the bake-off of 13 existing runtimes ([`REPORT.md`](results/REPORT.md)) to the speed round ([`SPEED.md`](results/SPEED.md)).
 
 ## Models
 
@@ -117,6 +121,21 @@ Everything here was measured on one Mac: a MacBook Pro 14 with a base M5, on mac
 | `english` | `convaiinnovations/laya` | ModernBERT-large | 100% on smoke, short and cold; no upstream correctness reference exists |
 
 The first `serve` of a model downloads it. `--model` also takes a local checkpoint directory, which `sys1rust` reads without downloading anything; the Hugging Face CLI's `hf download <repo>` fetches another hub checkpoint and prints its directory.
+
+## Build from source
+
+You need an Apple silicon Mac, Rust 1.89 or newer, CMake, the Xcode command line tools, and Python 3.10 or newer. Python only fetches MLX. `sys1rust` doesn't run it.
+
+```sh
+# A prebuilt MLX 0.32.2 (the Python wheel ships libmlx and its CMake files).
+python3 -m venv .mlx && .mlx/bin/pip install mlx==0.32.2
+export MLX_SYS_PREBUILT_DIR="$(.mlx/bin/python -c 'import mlx.core, os; print(os.path.dirname(mlx.core.__file__))')"
+
+# The binaries go to runtime/target/release/.
+cargo build --release --manifest-path runtime/Cargo.toml
+```
+
+Then run `runtime/target/release/sys1rust serve`. Where this README runs `sys1rust`, use that path, or add `runtime/target/release` to your `PATH`. The binary loads MLX from that venv by its absolute path, so keep `.mlx/` where it is.
 
 ## More
 
@@ -137,11 +156,11 @@ Each flag falls back to an environment variable. The `LAYA_*` ones are the same 
 | `--f32` | `SYS1_F32` | off | run the transformer in f32 instead of the checkpoint's f16 |
 | `--offline` | `HF_HUB_OFFLINE` | off | never download; a model that is not in the cache is an error. `HF_HUB_OFFLINE` turns it on when set to `1`, `ON`, `YES` or `TRUE`, in any letter case |
 
-`sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. Downloads honor `HF_ENDPOINT` and `HF_TOKEN`. `sys1rust` sends the token only to the endpoint, never after a redirect.
+Downloads honor `HF_ENDPOINT` and `HF_TOKEN`. `sys1rust` sends the token only to the endpoint, never after a redirect.
 
 `sys1rust` sets MLX's `MLX_MAX_MB_PER_BUFFER` to 10, measured faster on the M5, unless it is already set. At load it checks its M5 matmul kernels against MLX's, bit for bit, and prints the result on stderr. If the check fails, it uses MLX's matmuls and prints why.
 
-When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `runtime/target/release/sys1rust serve --help` lists everything.
+When it's ready, `sys1rust` prints one JSON line on stdout with the address, model, revision, load time and warm-up time. `GET /health` reports the model, revision and engine. SIGINT or SIGTERM lets requests in flight finish before it exits. `sys1rust serve --help` lists everything.
 
 </details>
 
@@ -150,13 +169,13 @@ When it's ready, `sys1rust` prints one JSON line on stdout with the address, mod
 
 `sys1rust` listens on 127.0.0.1 by default, so only programs on the same Mac can reach it. Keep that default. `sys1rust` speaks plain HTTP without TLS, and it has no header read timeout and no connection limit. Only the request body has a deadline, and a body that takes over 10 s gets `408`.
 
-An API key alone does not make remote serving safe. With `LAYA_API_KEY` set, `/v1/systemone` answers only requests that send `Authorization: Bearer <key>`, but over plain HTTP anyone on the network path can read that key. The key is checked only once the headers have arrived, so it does nothing against connections that never finish sending them. Each such connection holds a socket for as long as the client keeps it open, and nothing caps how many there are.
+An API key alone does not make remote serving safe. With `LAYA_API_KEY` set, `/v1/systemone` answers only requests that send `Authorization: Bearer <key>`, but over plain HTTP anyone on the network path can read that key. `sys1rust` checks the key only once the headers have arrived, so it does nothing against connections that never finish sending them. Each such connection holds a socket for as long as the client keeps it open, and nothing caps how many there are.
 
 To serve clients on other machines, run a reverse proxy on the same Mac in front of `sys1rust`. The proxy should terminate TLS, time out slow headers, limit connections and forward to 127.0.0.1. Set an API key as well:
 
 ```sh
 export LAYA_API_KEY=replace-with-a-secret
-runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.0.0.1:8000
+sys1rust serve --port 8000   # the proxy forwards to 127.0.0.1:8000
 ```
 
 `--host` changes the bind address, but any client that can reach a wider address talks to `sys1rust` directly, with none of the proxy's protections.
@@ -167,8 +186,8 @@ runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.
 <summary><strong>Differences from <code>laya serve</code></strong></summary>
 
 - **Bind address.** `sys1rust` listens on 127.0.0.1 by default. `laya serve` listens on 0.0.0.0.
-- **Downloads.** `sys1rust` downloads only the three Laya models, only at the revisions pinned in `bench/models.lock.json`, and only the five files each one needs. `laya serve` downloads any model repo at its newest revision.
-- **Duplicate choice keys.** When two of a choice's labels print as the same JSON key, such as `"1"` and `1`, upstream writes that key twice in `probabilities`, and `sys1rust` writes it once with the second label's probability. Python's `json`, JavaScript's `JSON.parse` and serde_json's `Value` keep the last duplicate, so a client parsing with one of them gets the same object from both servers. A parser that rejects duplicate keys or keeps the first one reads the two responses differently.
+- **Downloads.** `sys1rust` downloads only the 3 Laya models, only at the revisions pinned in `bench/models.lock.json`, and only the 5 files each one needs. `laya serve` downloads any model repo at its newest revision.
+- **Duplicate choice keys.** When 2 of a choice's labels print as the same JSON key, such as `"1"` and `1`, upstream writes that key twice in `probabilities`, and `sys1rust` writes it once with the second label's probability. Python's `json`, JavaScript's `JSON.parse` and serde_json's `Value` keep the last duplicate, so a client parsing with one of them gets the same object from both servers. A parser that rejects duplicate keys or keeps the first one reads the 2 responses differently.
 - **JSON.** `sys1rust` accepts standard JSON in UTF-8. Upstream's `json.loads` also accepts `NaN`, `Infinity` and `-Infinity`, `\u` escapes of unpaired surrogates, and bodies in UTF-16 or UTF-32 or with a byte order mark. `sys1rust` answers those with 400 `request body must be valid JSON`.
 
 </details>
@@ -176,7 +195,7 @@ runtime/target/release/sys1rust serve --port 8000   # the proxy forwards to 127.
 <details>
 <summary><strong>Build and run inside the benchmark setup</strong></summary>
 
-Use this instead of [Build](#build) when working on the benchmark. `bench/env.sh` takes MLX from the laya-mlx contender's venv but does not create it, so the first step sets that venv up once, as in `bench/contenders/laya-mlx/NOTES.md`. That step needs `uv`. The script also keeps the Cargo output and the Hugging Face cache under `bench/`, so the binary is at `$CARGO_TARGET_DIR/release/sys1rust`. The commands download and serve the typed-decisions revision pinned in `bench/models.lock.json`, the one the results used.
+Use this instead of [Build from source](#build-from-source) when working on the benchmark. `bench/env.sh` takes MLX from the laya-mlx contender's venv but does not create it, so the first step sets that venv up once, as in `bench/contenders/laya-mlx/NOTES.md`. That step needs `uv`. The script also keeps the Cargo output and the Hugging Face cache under `bench/`, so the binary is at `$CARGO_TARGET_DIR/release/sys1rust`. The commands download and serve the typed-decisions revision pinned in `bench/models.lock.json`, the one the results used.
 
 ```sh
 source bench/env.sh
