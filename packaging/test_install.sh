@@ -75,6 +75,7 @@ case $1 in
     else
       printf '\tstate = running\n\tlast exit code = (never exited)\n'
     fi
+    [ ! -f "$d/pid" ] || printf '\tpid = %s\n' "$(cat "$d/pid")"
     ;;
   bootstrap)
     [ ! -f "$d/loaded" ] || exit 37
@@ -89,10 +90,23 @@ case $1 in
     ;;
   kickstart)
     # The new run answers 2 s later, as a real server does after loading the model.
-    kill "$(cat "$d/pid")"
+    [ ! -f "$d/kick-fail-next" ] || exit 5
+    [ ! -f "$d/pid" ] || kill "$(cat "$d/pid")" 2>/dev/null || true
+    if [ -f "$d/fail-next" ]; then
+      rm -f "$d/pid"
+      touch "$d/failed"
+      exit 0
+    fi
+    if [ -f "$d/no-listener-next" ]; then
+      # The job has a live PID before it exits, while a different process serves /health.
+      (sleep 2; touch "$d/failed"; sleep 30) >/dev/null 2>&1 </dev/null &
+      echo $! >"$d/pid"
+      exit 0
+    fi
     (sleep 2 && exec python3 -m http.server --bind 127.0.0.1 --directory "$d/www" "$(plutil -extract EnvironmentVariables.LAYA_PORT raw "$d/plist" 2>/dev/null || echo 8000)") \
       >/dev/null 2>&1 </dev/null &
     echo $! >"$d/pid"
+    rm -f "$d/failed"
     touch "$d/kicked"
     ;;
   bootout)
@@ -349,6 +363,41 @@ check "service update probes its recorded cache" eval '[ "$(cat "$T/model-cache"
 : >"$T/launchd/calls"
 run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$S" --bin-dir "$T/sb"
 check "a rerun leaves the service alone" eval '[ $status = 0 ] && ! grep -q kickstart "$T/launchd/calls" && has "The sys1rust service runs this version"'
+
+service_before=$(cat "$T/launchd/pid")
+run FAKE_MV_MODE=after-switch -- --from "$T/d3" --prefix "$S" --bin-dir "$T/sb"
+check "an interrupted service update keeps a pending restart" eval '[ $status != 0 ] && version_is "$S/current" 0.3.0-macos26 && [ "$(cat "$T/launchd/pid")" = "$service_before" ] && [ -f "$S/.sys1rust-install/service-restart" ]'
+run SYS1RUST_RELEASES_URL="$URL" -- --version v0.3.0 --prefix "$S" --bin-dir "$T/sb"
+check "retry restarts after current already switched" eval '[ $status = 0 ] && [ "$(cat "$T/launchd/pid")" != "$service_before" ] && has "Restarting the sys1rust service" && [ ! -e "$S/.sys1rust-install/service-restart" ]'
+touch "$T/launchd/kick-fail-next"
+run --from "$T/d2" --prefix "$S" --bin-dir "$T/sb"
+check "a failed restart keeps its pending marker" eval '[ $status = 1 ] && has "kickstart could not restart" && [ -f "$S/.sys1rust-install/service-restart" ]'
+rm "$T/launchd/kick-fail-next"
+run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$S" --bin-dir "$T/sb"
+check "retry recovers a failed restart" eval '[ $status = 0 ] && has "Restarting the sys1rust service" && [ ! -e "$S/.sys1rust-install/service-restart" ]'
+
+# A healthy foreground server must not hide a failed or non-listening LaunchAgent.
+for mode in fail-next no-listener-next; do
+  kill "$(cat "$T/launchd/pid")"
+  rm "$T/launchd/pid"
+  python3 -m http.server --bind 127.0.0.1 --directory "$T/launchd/www" "$PORT" >/dev/null 2>&1 &
+  OTHER=$!
+  for _ in $(seq 600); do
+    curl -fs -o /dev/null "http://127.0.0.1:$PORT/health" 2>/dev/null && break
+    kill -0 "$OTHER" 2>/dev/null || break
+    sleep 0.1
+  done
+  check "the foreground server answers before $mode" curl -fs -o /dev/null "http://127.0.0.1:$PORT/health"
+  touch "$T/launchd/$mode"
+  SECONDS=0
+  run --from "$T/d2" --prefix "$S" --bin-dir "$T/sb"
+  check "a foreground listener cannot hide $mode" eval '[ $status = 1 ] && has "the service exited before it answered /health" && [ $SECONDS -lt 10 ] && [ -f "$S/.sys1rust-install/service-restart" ]'
+  kill "$OTHER"
+  wait "$OTHER" 2>/dev/null || true
+  rm "$T/launchd/$mode"
+  run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$S" --bin-dir "$T/sb"
+  check "service recovers after $mode" eval '[ $status = 0 ] && [ -s "$T/launchd/pid" ] && [ ! -e "$S/.sys1rust-install/service-restart" ]'
+done
 # An install and uninstall in another prefix leave this service alone.
 : >"$T/launchd/calls"
 run --from "$T/d3" --prefix "$T/o" --bin-dir "$T/ob"
@@ -480,6 +529,34 @@ switched=$(readlink "$T/atomic/current")
 check "an interruption after current switches leaves a working binary" eval '[ $status != 0 ] && version_is "$T/atomic/current" 0.2.0-macos26 && "$T/atomic-bin/sys1rust" --version >/dev/null && [ ! -e "$T/atomic/.lock" ]'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
 check "a rerun recognizes an interrupted link registry update" eval '[ $status = 0 ] && link_is "$T/atomic/current" "$switched"'
+
+# Two first installs have different prefixes but share the absent default bin link.
+rm "$T/ready" "$T/resume"
+env -i HOME="$T/home" PATH="$T/fake:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$T" LAYA_PORT="$PORT" \
+  FAKE_LAUNCHD="$T/launchd" FAKE_MV_MODE=pause FAKE_MV_READY="$T/ready" FAKE_MV_RESUME="$T/resume" \
+  "$SH" "$ROOT/install.sh" --from "$T/d1" --prefix "$T/shared-a" --service >"$T/overlap.log" 2>&1 &
+INSTALL_PID=$!
+for _ in $(seq 600); do
+  [ -e "$T/ready" ] && break
+  kill -0 "$INSTALL_PID" 2>/dev/null || break
+  sleep 0.1
+done
+check "a first install holds shared locks" test -f "$T/ready"
+run --from "$T/d2" --prefix "$T/shared-b"
+check "different prefixes cannot race an absent bin link" eval '[ $status = 1 ] && has "another installer is running" && [ ! -e "$T/home/.local/bin/sys1rust" ] && [ ! -e "$T/shared-b" ]'
+run --from "$T/d2" --prefix "$T/shared-service" --bin-dir "$T/separate-bin" --service
+check "different bin directories cannot race the service" eval '[ $status = 1 ] && has "another installer is running" && [ ! -e "$AGENT" ] && [ ! -e "$T/shared-service" ]'
+run HOME="$T/another-home" -- --from "$T/d2" --prefix "$T/shared-home" --bin-dir "$T/home/.local/bin"
+check "the bin lock also protects callers with another HOME" eval '[ $status = 1 ] && has "another installer is running" && [ ! -e "$T/home/.local/bin/sys1rust" ]'
+touch "$T/resume"
+status=0
+wait "$INSTALL_PID" || status=$?
+INSTALL_PID=
+check "the first shared install finishes without replacement" eval '[ $status = 0 ] && link_is "$T/home/.local/bin/sys1rust" "$T/shared-a/current/bin/sys1rust" && [ "$(plutil -extract Sys1rustInstallPrefix raw "$AGENT")" = "$T/shared-a" ]'
+run --from "$T/d2" --prefix "$T/shared-b"
+check "a later install refuses the other prefix bin link" eval '[ $status = 1 ] && has "not this installer" && link_is "$T/home/.local/bin/sys1rust" "$T/shared-a/current/bin/sys1rust"'
+run --uninstall --prefix "$T/shared-a"
+check "shared locks are removed after completion" eval '[ $status = 0 ] && [ ! -e "$T/home/.local/bin/.sys1rust-install.lock" ] && [ ! -e "$T/home/Library/LaunchAgents/.io.github.krishhgg.sys1rust.install.lock" ]'
 
 # Evaluate the printed PATH assignment in a fresh shell. Directory text stays literal.
 WEIRD="$T/bin space' dollar\$ backtick\` quote\" backslash\\"

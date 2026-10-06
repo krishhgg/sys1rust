@@ -111,19 +111,30 @@ check_prefix() {
 }
 
 acquire_lock() {
-  if ! mkdir "$lock" 2>/dev/null; then
-    lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+  if ! mkdir "$1" 2>/dev/null; then
+    lock_pid=$(cat "$1/pid" 2>/dev/null || true)
     case $lock_pid in
-      '' | *[!0-9]*) die "another installer is acquiring $lock. Retry when it finishes" ;;
+      '' | *[!0-9]*) die "another installer is acquiring $1. Retry when it finishes" ;;
     esac
     if kill -0 "$lock_pid" 2>/dev/null; then
-      die "another installer is running for $prefix (PID $lock_pid)"
+      die "another installer is running at $1 (PID $lock_pid)"
     fi
     # Automatic removal could race another process that has already replaced this lock.
-    die "a stale installer lock remains at $lock (PID $lock_pid). After checking no installer runs, remove it with: rm -f $(shell_quote "$lock/pid") && rmdir $(shell_quote "$lock")"
+    die "a stale installer lock remains at $1 (PID $lock_pid). After checking no installer runs, remove it with: rm -f $(shell_quote "$1/pid") && rmdir $(shell_quote "$1")"
   fi
-  locked=1
-  printf '%s\n' "$$" >"$lock/pid"
+  case $1 in
+    "$lock") locked=1 ;;
+    "$shared_lock") shared_locked=1 ;;
+    "$bin_lock") bin_locked=1 ;;
+  esac
+  printf '%s\n' "$$" >"$1/pid"
+}
+
+release_lock() {
+  if [ "$2" = 1 ] && [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$1/pid"
+    rmdir "$1" 2>/dev/null || true
+  fi
 }
 
 create_owner() {
@@ -277,10 +288,10 @@ cleanup() {
   if [ -n "$stage" ]; then rm -rf "$stage"; fi
   if [ -n "$pending_link" ] && [ -L "$pending_link" ]; then rm -f "$pending_link"; fi
   if [ -n "$plist_stage" ]; then rm -f "$plist_stage"; fi
-  if [ "$locked" = 1 ] && [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ]; then
-    rm -f "$lock/pid"
-    rmdir "$lock" 2>/dev/null || true
-  fi
+  release_lock "$bin_lock" "$bin_locked"
+  release_lock "$shared_lock" "$shared_locked"
+  release_lock "$lock" "$locked"
+  case $bin_dir in "$prefix"/*) rmdir "$bin_dir" 2>/dev/null || true ;; esac
   rmdir "$prefix" 2>/dev/null || true
 }
 
@@ -307,6 +318,20 @@ read_service_env() {
 
 health_ok() { curl -fs --max-time 2 -o /dev/null "http://127.0.0.1:$port/health"; }
 
+service_pid() {
+  launchctl print "gui/$uid/$LABEL" 2>/dev/null |
+    awk '$1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; exit }'
+}
+
+# A foreground server can answer /health while this job fails to bind. Require launchd's
+# PID to own the listening socket, and check the PID again after the HTTP request.
+service_health_ok() {
+  health_pid=$(service_pid)
+  [ -n "$health_pid" ] || return 1
+  [ "$(lsof -nP -a -p "$health_pid" -iTCP@127.0.0.1:"$port" -sTCP:LISTEN -t 2>/dev/null)" = "$health_pid" ] || return 1
+  health_ok && [ "$(service_pid)" = "$health_pid" ]
+}
+
 # Exits 0 when the service is not running and its last run failed. A run that kickstart -k
 # stopped exits 0 and stays in launchd's report, so a clean exit does not count. launchd's
 # report is not a stable format, so this only speeds up a failure that the wait would
@@ -318,13 +343,13 @@ service_exited() {
     END { exit !(failed && !running) }'
 }
 
-# Waits up to HEALTH_WAIT seconds for /health. Returns 0 when it answers, 2 when the server
+# Waits up to HEALTH_WAIT seconds for the job's /health. Returns 0 when it answers, 2 when the server
 # exited first and 1 on timeout.
 wait_health() {
   t=0
   while [ "$t" -lt "$HEALTH_WAIT" ]; do
-    health_ok && return 0
     service_exited && return 2
+    service_health_ok && return 0
     sleep 1
     t=$((t + 1))
   done
@@ -351,6 +376,7 @@ check_service() {
   rc=0
   wait_health || rc=$?
   if [ "$rc" = 0 ]; then
+    rm -f "$owner/service-restart"
     say "sys1rust serve answers on http://127.0.0.1:$port. Its log is $log"
     return 0
   fi
@@ -511,7 +537,7 @@ uninstall() {
       rm -f "$entry"
     done
     rm -f "$owner/format" "$owner/bin-link" "$owner/bin-target" "$owner/bin-target.next" \
-      "$owner/current" "$owner/current.next" "$owner/previous" "$owner/previous.next" "$owner/service" "$owner/log-id"
+      "$owner/current" "$owner/current.next" "$owner/previous" "$owner/previous.next" "$owner/service" "$owner/log-id" "$owner/service-restart"
     rmdir "$owner/versions" "$owner" 2>/dev/null || true
     # cleanup releases the lock and removes the prefix when it has no foreign files.
     say "Removed the registered install from $prefix. Any unrelated files stay there"
@@ -601,7 +627,11 @@ main() {
   pending_link=
   plist_stage=
   locked=0
+  shared_locked=0
+  bin_locked=0
   lock=$prefix/.lock
+  shared_lock=$HOME/Library/LaunchAgents/.$LABEL.install.lock
+  bin_lock=$bin_dir/.sys1rust-install.lock
   owner=$prefix/.sys1rust-install
   check_prefix
   if [ "$remove" = 1 ]; then
@@ -615,8 +645,13 @@ main() {
   trap cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  acquire_lock
+  acquire_lock "$lock"
   check_prefix
+  # Different prefixes can share a bin link, and every service uses the same label and
+  # plist. Hold both shared locks before checking ownership or changing these paths.
+  mkdir -p "$bin_dir" "${shared_lock%/*}"
+  acquire_lock "$shared_lock"
+  acquire_lock "$bin_lock"
 
   if [ "$remove" = 1 ]; then
     uninstall
@@ -676,12 +711,13 @@ main() {
   fi
 
   old=$(readlink "$prefix/current" 2>/dev/null || true)
-  changed=0
   if [ "$old" != "$dir" ]; then
+    # Persist the restart before switching current. A retry must restart an old process
+    # even when an interrupted invocation already switched the link to this directory.
+    if plist_runs_link && service_loaded; then : >"$owner/service-restart"; fi
     # Save the previous link first so interruption after the current switch keeps both.
     if [ -n "$old" ] && owned_version "$old"; then record_link "$old" "$prefix/previous" "$owner/previous"; fi
     record_link "$dir" "$prefix/current" "$owner/current"
-    changed=1
   fi
   mkdir -p "$bin_dir"
   if [ "$(readlink "$link" 2>/dev/null || true)" != "$prefix/current/bin/sys1rust" ]; then
@@ -720,13 +756,14 @@ main() {
     install_service
   elif plist_runs_link && service_loaded; then
     read_service_env
-    if [ "$changed" = 1 ]; then
+    if [ -f "$owner/service-restart" ]; then
       # launchd starts a job at most once per ThrottleInterval, so this waits up to 30 s
       # when the service started less than 30 s ago.
       say "Restarting the sys1rust service on the new version"
       launchctl kickstart -k "gui/$uid/$LABEL" || die "launchctl kickstart could not restart the service"
       check_service
     else
+      check_service
       say "The sys1rust service runs this version. Its log is $log"
     fi
   else
