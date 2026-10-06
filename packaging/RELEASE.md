@@ -1,8 +1,10 @@
 # Releasing sys1rust
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds both bundles on a macOS 26 runner, smoke-tests the macOS 14 bundle on a macOS 15 runner and the macOS 26 bundle on a macOS 26 runner, and publishes the GitHub release with `SHA256SUMS`. A final `vX.Y.Z` tag also updates `Formula/sys1rust.rb` in krishhgg/homebrew-tap. A `vX.Y.Z-rcN` tag publishes a prerelease and leaves the tap alone. A pull request that changes `packaging/` or the workflow runs the build and smoke jobs only.
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds both bundles on a macOS 26 runner, installs the macOS 14 bundle with `install.sh` on a macOS 15 runner and the macOS 26 bundle on a macOS 26 runner, smoke-tests them there, and publishes the GitHub release with both bundles and `SHA256SUMS`. A `vX.Y.Z-rcN` tag publishes a prerelease. `install.sh` installs the latest final release, and a prerelease only through `--version`. A pull request that changes `packaging/`, `install.sh` or the workflow runs the build and smoke jobs only.
 
-Run every command below from the repository root on a Mac with an M5-class GPU (GPU generation 17 or later) and macOS 26.2 or later. The strict suite's laya-mlx `settings` tests need MLX's NAX gemms and fail on the fallback that older GPUs get, while the smoke tests run on any Apple silicon Mac. Use 1 shell for all the commands, because later steps reuse `version`, `RUSTUP_TOOLCHAIN`, `HF_HUB_CACHE` and `rc`. The tests, the smoke runs and the Homebrew service load a model on the GPU. Run each of them alone, with no other GPU work on the Mac.
+The build job also runs `packaging/test_install.sh /bin/sh` and `packaging/test_install.sh /bin/dash`. They test `install.sh` against fake bundles, a local release server and a fake `launchctl`, and need no build, network or GPU. Run them after any change to `install.sh`.
+
+Run every command below from the repository root on a Mac with an M5-class GPU (GPU generation 17 or later) and macOS 26.2 or later. The strict suite's laya-mlx `settings` tests need MLX's NAX gemms and fail on the fallback that older GPUs get, while the smoke tests run on any Apple silicon Mac. Use 1 shell for all the commands, because later steps reuse `version`, `RUSTUP_TOOLCHAIN`, `HF_HUB_CACHE` and `rc`. The tests, the smoke runs and the server in step 5 load a model on the GPU. Run each of them alone, with no other GPU work on the Mac.
 
 1. Install the pinned Rust and select it for this shell. `packaging/build.sh` and `packaging/third_party.py` stop when `rustc` or `cargo` reports another version.
    ```sh
@@ -40,37 +42,32 @@ Run every command below from the repository root on a Mac with an M5-class GPU (
      python3 packaging/smoke.py packaging/.work/$fl/sys1rust-$version-$fl-arm64/bin/sys1rust
    done
    ```
-4. Tag a release candidate and push the tag. `rc` holds the candidate's tag for this step and the next. The workflow builds and smoke-tests the bundles and publishes a prerelease. It leaves the tap alone. Follow the run on the repository's Actions page. If a job fails, merge the fix to main, run `git pull --ff-only`, set `rc` to the next candidate, such as `v$version-rc2`, and run the tag line again.
+4. Tag a release candidate and push the tag. `rc` holds the candidate's tag for this step and the next. The workflow builds and smoke-tests the bundles and publishes a prerelease. Follow the run on the repository's Actions page. If a job fails, merge the fix to main, run `git pull --ff-only`, set `rc` to the next candidate, such as `v$version-rc2`, and run the tag line again.
    ```sh
    rc=v$version-rc1
    git tag "$rc" && git push origin "$rc"
    ```
-5. Install the candidate through Homebrew from a throwaway local tap. `packaging/render_formula.sh` writes the formula for the prerelease with the hashes from its `SHA256SUMS`. The service does not see this shell's `HF_HUB_CACHE`, so its first start downloads typed-decisions (846 MB) if `~/.cache/huggingface/hub` does not hold it yet. If `curl` never answers, read `$(brew --prefix)/var/log/sys1rust.log`.
+5. Install the candidate with `install.sh` into a scratch prefix, as a user would. `install.sh` downloads the bundle for this Mac and checks it against the prerelease's `SHA256SUMS`. Then check that it serves in this shell and as a LaunchAgent. `--service` passes this shell's `HF_HUB_CACHE` into the LaunchAgent, so the service loads typed-decisions from the cache that step 3 filled. `install.sh --service` waits up to 60 s for `/health`, and if the server fails it prints the end of `~/Library/Logs/sys1rust.log`. Every install uses the same LaunchAgent label, so `--service` here replaces a sys1rust service that this account already runs. Run `install.sh --service` again afterward to bring that one back. `--uninstall` removes the scratch install, the LaunchAgent and its log, and keeps the models.
    ```sh
-   sums=$(gh release download "$rc" --repo krishhgg/sys1rust --pattern SHA256SUMS --output -)
-   sha() { printf '%s\n' "$sums" | awk -v f="sys1rust-$version-$1-arm64.tar.gz" '$2 == f {print $1}'; }
-   brew tap-new --no-git local/sys1rust-test
-   packaging/render_formula.sh "$rc" "$(sha macos26)" "$(sha macos14)" \
-     > "$(brew --repository local/sys1rust-test)/Formula/sys1rust.rb"
-   HOMEBREW_NO_AUTO_UPDATE=1 brew install local/sys1rust-test/sys1rust
-   brew test local/sys1rust-test/sys1rust
-   brew services start local/sys1rust-test/sys1rust
-   until curl -fsS 127.0.0.1:8000/health; do sleep 2; done
-   brew services stop local/sys1rust-test/sys1rust
-   brew uninstall sys1rust && brew untap local/sys1rust-test
+   tmp=$(mktemp -d)
+   ./install.sh --version "$rc" --prefix "$tmp" --bin-dir "$tmp/bin"
+   "$tmp/bin/sys1rust" serve & pid=$!
+   until curl -fs 127.0.0.1:8000/health; do sleep 2; done
+   kill "$pid" && wait "$pid"
+   ./install.sh --version "$rc" --prefix "$tmp" --bin-dir "$tmp/bin" --service
+   ./install.sh --uninstall --prefix "$tmp" --bin-dir "$tmp/bin"
    ```
-6. Tag the release and push the tag. The workflow publishes the release and pushes `Formula/sys1rust.rb` to krishhgg/homebrew-tap with the `TAP_TOKEN` secret, a fine-grained token with contents read and write on that repo only. The publish job stops on an empty secret. Before it creates the release, it also runs `git push --dry-run` against the tap with the token. GitHub answers that only for a token that it accepts and that has push access to the tap, so an expired, revoked or read-only token also stops the job before anything goes public. The dry run sends no commits, so it does not check branch rules on the tap's main.
+6. Tag the release and push the tag. The workflow publishes the release, and `releases/latest` then points to it, so `install.sh` without `--version` installs it.
    ```sh
    git tag "v$version" && git push origin "v$version"
    ```
-7. On a clean account, or after `brew uninstall sys1rust`, check that `brew install krishhgg/tap/sys1rust`, `sys1rust serve` and `brew services start sys1rust` work.
+7. On a clean macOS account, check the one-line install from main with the first line below. Add `~/.local/bin` to `PATH` if `install.sh` prints the line for it. Then check that `sys1rust serve` answers `curl 127.0.0.1:8000/health` from another shell. Its first start downloads typed-decisions (846 MB). Stop the server, then run the other 2 lines to check the service and the uninstall.
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh
+   curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh -s -- --service
+   curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh -s -- --uninstall
+   ```
 
-## If the tap update fails
+## If the publish job fails
 
-If the publish job fails at the token check or at the push because `TAP_TOKEN` expired or lost access, make a new fine-grained token with contents read and write on krishhgg/homebrew-tap only. Store it with the command below, which prompts for the value. Then open the failed run on the Actions page and choose "Re-run failed jobs". If a cancelled attempt left a draft release of the tag, the rerun stops and names it. Delete it on the Releases page, or with `gh release delete <tag>` after checking that it is still a draft, then rerun the publish job. The rerun keeps a published release only if that release's 2 bundles and `SHA256SUMS` match the run's files, and otherwise stops. Then it pushes the formula. If the formula is already up to date, the job finishes without a commit. If the tap already has a newer version, the job leaves the tap alone and says so in a notice. "Re-run all jobs" builds new bundles, and the publish job then stops rather than replace the published files.
-
-```sh
-gh secret set TAP_TOKEN --repo krishhgg/sys1rust
-```
-
-Publish jobs of all tags run one at a time, and GitHub holds at most 1 more waiting. A third tag pushed while 1 publish job runs and another waits cancels the waiting job. Rerun it.
+Open the failed run on the Actions page and choose "Re-run failed jobs". If a cancelled attempt left a draft release of the tag, the rerun stops and names it. Delete it on the Releases page, or with `gh release delete <tag>` after checking that it is still a draft, then rerun the publish job. The rerun keeps a published release only if that release's 2 bundles and `SHA256SUMS` match the run's files, and otherwise stops. "Re-run all jobs" builds new bundles, and the publish job then stops rather than replace the published files.
