@@ -2,7 +2,7 @@
 # Installs, updates or removes sys1rust on an Apple silicon Mac, without sudo. It also runs
 # piped, as `curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh`.
 # It downloads the release bundle for this macOS version, checks it against the release's
-# SHA256SUMS, unpacks it into PREFIX/<version>-<flavor>/ and points PREFIX/current and
+# SHA256SUMS, unpacks it into a unique PREFIX/<version>-<flavor>.<id>/ and points PREFIX/current and
 # BIN_DIR/sys1rust at it. A rerun updates to the latest release, keeps the version before it as
 # PREFIX/previous and deletes older ones. --service runs `sys1rust serve` as a LaunchAgent.
 # install.sh never downloads a model. `sys1rust pull` and the first `sys1rust serve` do that.
@@ -39,8 +39,9 @@ EOF
 }
 
 # A reader that closes the output early, such as head, must not stop an install halfway, so
-# main ignores SIGPIPE and say ignores the write error.
-say() { printf '%s\n' "$*" 2>/dev/null || true; }
+# main ignores SIGPIPE and say ignores the write error. External printf keeps Bash 3.2's
+# failed output buffer out of later command substitutions.
+say() { /usr/bin/printf '%s\n' "$*" 2>/dev/null || true; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 usage_error() { printf 'install.sh: %s. install.sh --help lists the options.\n' "$*" >&2; exit 2; }
 
@@ -84,12 +85,101 @@ hub_dir() {
 
 xml() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
 
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# The registry records the paths this installer created. Never infer ownership from a
+# filename. A marker inside each version also prevents deletion of a replacement directory.
+check_prefix() {
+  [ ! -L "$prefix" ] || die "$prefix is a symlink. Pick a directory for --prefix"
+  if [ -e "$owner" ] || [ -L "$owner" ]; then
+    if [ ! -d "$owner" ] || [ -L "$owner" ] ||
+      [ "$(cat "$owner/format" 2>/dev/null)" != 'sys1rust installer 1' ]; then
+      die "$prefix has an invalid installer registry"
+    fi
+    if [ ! -d "$owner/versions" ] || [ -L "$owner/versions" ]; then die "$owner has no version registry"; fi
+    [ "$(cat "$owner/bin-link" 2>/dev/null)" = "$link" ] ||
+      die "$prefix belongs to another --bin-dir. Use the bin directory recorded in $owner/bin-link"
+  elif [ -d "$prefix" ]; then
+    for entry in "$prefix"/* "$prefix"/.[!.]* "$prefix"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      [ "$entry" = "$lock" ] && [ "$locked" = 1 ] && continue
+      die "$prefix is not empty and has no installer registry. Pick an empty --prefix"
+    done
+  elif [ -e "$prefix" ]; then
+    die "$prefix is not a directory"
+  fi
+}
+
+acquire_lock() {
+  if ! mkdir "$lock" 2>/dev/null; then
+    lock_pid=$(cat "$lock/pid" 2>/dev/null || true)
+    case $lock_pid in
+      '' | *[!0-9]*) die "another installer is acquiring $lock. Retry when it finishes" ;;
+    esac
+    if kill -0 "$lock_pid" 2>/dev/null; then
+      die "another installer is running for $prefix (PID $lock_pid)"
+    fi
+    # Automatic removal could race another process that has already replaced this lock.
+    die "a stale installer lock remains at $lock (PID $lock_pid). After checking no installer runs, remove it with: rm -f $(shell_quote "$lock/pid") && rmdir $(shell_quote "$lock")"
+  fi
+  locked=1
+  printf '%s\n' "$$" >"$lock/pid"
+}
+
+create_owner() {
+  [ ! -d "$owner" ] || return 0
+  registry=$stage/registry
+  mkdir "$registry" "$registry/versions"
+  printf '%s\n' 'sys1rust installer 1' >"$registry/format"
+  printf '%s\n' "$link" >"$registry/bin-link"
+  mv "$registry" "$owner"
+}
+
+owned_version() {
+  printf '%s\n' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?-macos(14|26)\.[[:alnum:]]{6}$' &&
+    [ -f "$owner/versions/$1" ] && [ ! -L "$prefix/$1" ] &&
+    [ "$(cat "$prefix/$1/.sys1rust-owned" 2>/dev/null)" = "$1" ]
+}
+
+check_owned_link() {
+  if [ -e "$1" ] || [ -L "$1" ]; then
+    link_matches "$1" "$2" || die "$1 is not this installer's link. Move it away before installing"
+  fi
+}
+
+link_matches() {
+  [ -L "$1" ] && {
+    [ "$(readlink "$1")" = "$(cat "$2" 2>/dev/null)" ] ||
+    [ "$(readlink "$1")" = "$(cat "$2.next" 2>/dev/null)" ]
+  }
+}
+
+record_link() {
+  # Keep both possible targets registered until the atomic switch finishes. A signal
+  # between the switch and the registry update still leaves a recognized working link.
+  printf '%s\n' "$1" >"$3.next"
+  swap_link "$1" "$2"
+  mv -f "$3.next" "$3"
+}
+
+remove_owned_link() {
+  if link_matches "$1" "$2"; then
+    rm -f "$1"
+    say "Removed $1"
+  elif [ -e "$1" ] || [ -L "$1" ]; then
+    say "Left $1, which no longer matches the installer registry"
+  fi
+}
+
 # Points symlink $2 at $1 in 1 rename, so readers see the old target or the new one and never
 # a missing link. mv -h renames over a link to a directory instead of moving into it.
 swap_link() {
-  rm -f "$2.new.$$"
-  ln -s "$1" "$2.new.$$"
-  mv -fh "$2.new.$$" "$2"
+  next_link=$2.new.$$
+  if [ -e "$next_link" ] || [ -L "$next_link" ]; then die "$next_link already exists"; fi
+  pending_link=$next_link
+  ln -s "$1" "$pending_link"
+  mv -fh "$pending_link" "$2"
+  pending_link=
 }
 
 # fetch URL FILE: downloads URL to FILE and sets http_code. curl retries transient failures
@@ -185,6 +275,12 @@ get_bundle() {
 # Removes the staging dir, and the prefix too when a failed first install leaves it empty.
 cleanup() {
   if [ -n "$stage" ]; then rm -rf "$stage"; fi
+  if [ -n "$pending_link" ] && [ -L "$pending_link" ]; then rm -f "$pending_link"; fi
+  if [ -n "$plist_stage" ]; then rm -f "$plist_stage"; fi
+  if [ "$locked" = 1 ] && [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$lock/pid"
+    rmdir "$lock" 2>/dev/null || true
+  fi
   rmdir "$prefix" 2>/dev/null || true
 }
 
@@ -192,7 +288,22 @@ service_loaded() { launchctl print "gui/$uid/$LABEL" >/dev/null 2>&1; }
 
 # Exits 0 when the LaunchAgent runs this install's link. The label is the same for every
 # prefix, so an install or uninstall in a scratch prefix leaves another install's service be.
-plist_runs_link() { [ -f "$plist" ] && grep -qF "<string>$(xml "$link")</string>" "$plist"; }
+plist_value() { /usr/libexec/PlistBuddy -c "Print :$1" "$plist" 2>/dev/null; }
+plist_runs_link() {
+  [ -f "$owner/service" ] && [ -f "$plist" ] && [ ! -L "$plist" ] &&
+    [ "$(cat "$owner/service")" = "$plist" ] && [ "$(plist_value Label)" = "$LABEL" ] &&
+    [ "$(plist_value ProgramArguments:0)" = "$link" ] &&
+    [ "$(plist_value Sys1rustInstallPrefix)" = "$prefix" ]
+}
+
+read_service_env() {
+  for name in HF_HUB_CACHE HF_HOME XDG_CACHE_HOME LAYA_PORT; do
+    unset "$name"
+    value=$(plist_value "EnvironmentVariables:$name" || true)
+    [ -z "$value" ] || export "$name=$value"
+  done
+  port=${LAYA_PORT:-8000}
+}
 
 health_ok() { curl -fs --max-time 2 -o /dev/null "http://127.0.0.1:$port/health"; }
 
@@ -244,7 +355,7 @@ check_service() {
     return 0
   fi
   if [ "$rc" = 1 ] && [ "$downloading" = 1 ]; then
-    say "The service is still starting. Follow the download with: tail -f $log"
+    say "The service is still starting. Follow the download with: tail -f $(shell_quote "$log")"
     say "It answers on http://127.0.0.1:$port/health once the download and load finish."
     return 0
   fi
@@ -263,6 +374,8 @@ write_plist() {
 <dict>
   <key>Label</key>
   <string>$LABEL</string>
+  <key>Sys1rustInstallPrefix</key>
+  <string>$(xml "$prefix")</string>
   <key>ProgramArguments</key>
   <array>
     <string>$(xml "$link")</string>
@@ -298,6 +411,16 @@ EOF
 }
 
 install_service() {
+  if [ -e "$plist" ] || [ -L "$plist" ]; then
+    if [ -L "$plist" ] || [ -z "$(plist_value Sys1rustInstallPrefix || true)" ]; then
+      die "$plist is not an installer LaunchAgent. Move it away before using --service"
+    fi
+  elif service_loaded; then
+    die "the LaunchAgent label $LABEL is already loaded without an installer plist"
+  elif [ -e "$log" ] || [ -L "$log" ]; then
+    die "$log already exists without an installer LaunchAgent. Move it away before using --service"
+  fi
+  if [ -L "$log" ] || { [ -e "$log" ] && [ ! -f "$log" ]; }; then die "$log is not a regular log file"; fi
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   if service_loaded; then
     launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
@@ -321,15 +444,25 @@ install_service() {
   # the cache that `sys1rust pull` in this shell fills.
   service_env=
   for name in HF_HUB_CACHE HF_HOME XDG_CACHE_HOME LAYA_PORT; do
-    if [ -n "$(printenv "$name" || true)" ]; then service_env="$service_env $name"; fi
+    value=$(printenv "$name" || true)
+    if [ -n "$value" ]; then
+      case $name in HF_HUB_CACHE | HF_HOME | XDG_CACHE_HOME) value=$(abs_path "$value") ;; esac
+      export "$name=$value"
+      service_env="$service_env $name"
+    fi
   done
   # KeepAlive restarts the server when it exits with an error or crashes, but not after a
   # clean stop. ThrottleInterval keeps a server that fails at once to 1 start per 30 s.
   # ProcessType Interactive takes away the CPU and I/O throttling that launchd puts on
   # background jobs, which would slow every request.
-  write_plist >"$plist.new.$$"
-  plutil -lint -s "$plist.new.$$" || die "the LaunchAgent plist is not valid"
-  mv -f "$plist.new.$$" "$plist"
+  touch "$log"
+  stat -f '%d:%i' "$log" >"$owner/log-id"
+  plist_stage=$(mktemp "$plist.XXXXXX")
+  write_plist >"$plist_stage"
+  plutil -lint -s "$plist_stage" || die "the LaunchAgent plist is not valid"
+  mv -f "$plist_stage" "$plist"
+  plist_stage=
+  printf '%s\n' "$plist" >"$owner/service"
   launchctl bootstrap "gui/$uid" "$plist" ||
     die "launchctl could not load $plist. A LaunchAgent needs a user logged in to this Mac's desktop"
   say "Installed the LaunchAgent $plist"
@@ -339,9 +472,11 @@ install_service() {
 
 uninstall() {
   [ "$(uname -s)" = Darwin ] || die "sys1rust runs only on macOS"
-  if [ -f "$plist" ] && ! plist_runs_link; then
+  [ -d "$owner" ] || die "$prefix has no installer registry. Nothing removed"
+  if ! plist_runs_link; then
     say "Left the LaunchAgent $plist and its log, since it runs another sys1rust than $link"
   else
+    read_service_env
     if service_loaded; then
       launchctl bootout "gui/$uid/$LABEL" 2>/dev/null || true
       t=0
@@ -356,36 +491,30 @@ uninstall() {
       rm -f "$plist"
       say "Removed $plist"
     fi
-    if [ -e "$log" ]; then
+    if [ -f "$log" ] && [ ! -L "$log" ] && [ "$(stat -f '%d:%i' "$log")" = "$(cat "$owner/log-id" 2>/dev/null)" ]; then
       rm -f "$log"
       say "Removed $log"
     fi
   fi
-  if [ -L "$link" ]; then
-    target=$(readlink "$link")
-    case $target in
-      "$prefix"/*)
-        rm -f "$link"
-        say "Removed $link"
-        ;;
-      *) say "Left $link, which points to $target" ;;
-    esac
-  fi
+  remove_owned_link "$link" "$owner/bin-target"
   # A --bin-dir inside the prefix goes with it once it is empty.
   case $bin_dir in
     "$prefix"/*) rmdir "$bin_dir" 2>/dev/null || true ;;
   esac
   if [ -d "$prefix" ]; then
-    # Deletes only what install.sh makes, so a wrong --prefix cannot take other files.
-    rm -f "$prefix/current" "$prefix/previous" "$prefix"/current.new.* "$prefix"/previous.new.*
-    for d in "$prefix"/*-macos14 "$prefix"/*-macos26 "$prefix"/.install.*; do
-      if [ -d "$d" ] && [ ! -L "$d" ]; then rm -rf "$d"; fi
+    remove_owned_link "$prefix/current" "$owner/current"
+    remove_owned_link "$prefix/previous" "$owner/previous"
+    for entry in "$owner/versions"/*; do
+      [ -f "$entry" ] || continue
+      name=${entry##*/}
+      if owned_version "$name"; then rm -rf "${prefix:?}/$name"; fi
+      rm -f "$entry"
     done
-    if rmdir "$prefix" 2>/dev/null; then
-      say "Removed $prefix"
-    else
-      say "Left $prefix, which holds files that install.sh did not make"
-    fi
+    rm -f "$owner/format" "$owner/bin-link" "$owner/bin-target" "$owner/bin-target.next" \
+      "$owner/current" "$owner/current.next" "$owner/previous" "$owner/previous.next" "$owner/service" "$owner/log-id"
+    rmdir "$owner/versions" "$owner" 2>/dev/null || true
+    # cleanup releases the lock and removes the prefix when it has no foreign files.
+    say "Removed the registered install from $prefix. Any unrelated files stay there"
   fi
   hub=$(hub_dir)
   set -- "$hub"/models--convaiinnovations--laya*
@@ -395,7 +524,7 @@ uninstall() {
     mb=$(find -L "$@" -type f -exec stat -L -f '%d:%i %z' {} + 2>/dev/null |
       awk '!seen[$1]++ { s += $2 } END { printf "%d", (s + 500000) / 1000000 }')
     say "Kept the Laya models in the model cache $hub, $mb MB. To delete them, run:"
-    say "  rm -rf \"$hub\"/models--convaiinnovations--laya*"
+    say "  rm -rf $(shell_quote "$hub")/models--convaiinnovations--laya*"
   else
     say "The model cache $hub holds no Laya models"
   fi
@@ -463,7 +592,31 @@ main() {
   plist=$HOME/Library/LaunchAgents/$LABEL.plist
   log=$HOME/Library/Logs/sys1rust.log
   port=${LAYA_PORT:-8000}
-  case $port in '' | *[!0-9]*) die "LAYA_PORT is '$port', not a port number" ;; esac
+  if [ "$remove" != 1 ]; then
+    case $port in '' | *[!0-9]*) die "LAYA_PORT is '$port', not a port number" ;; esac
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then die "LAYA_PORT must be between 1 and 65535"; fi
+  fi
+
+  stage=
+  pending_link=
+  plist_stage=
+  locked=0
+  lock=$prefix/.lock
+  owner=$prefix/.sys1rust-install
+  check_prefix
+  if [ "$remove" = 1 ]; then
+    [ -d "$owner" ] || die "$prefix has no installer registry. Nothing removed"
+  fi
+  mkdir -p "$prefix"
+  # Canonicalize the prefix so two paths through parent symlinks use the same lock.
+  prefix=$(cd "$prefix" && pwd -P)
+  lock=$prefix/.lock
+  owner=$prefix/.sys1rust-install
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  acquire_lock
+  check_prefix
 
   if [ "$remove" = 1 ]; then
     uninstall
@@ -474,6 +627,9 @@ main() {
   if [ -e "$link" ] && [ ! -L "$link" ]; then
     die "$link exists and is not a link. Move it away or pick another --bin-dir"
   fi
+  check_owned_link "$link" "$owner/bin-target"
+  check_owned_link "$prefix/current" "$owner/current"
+  check_owned_link "$prefix/previous" "$owner/previous"
   if [ -n "$from" ]; then
     [ -d "$from" ] || die "--from $from is not a directory"
     from=$(abs_path "$from")
@@ -490,35 +646,46 @@ main() {
     latest_tag
   fi
 
-  dir=${tag#v}-$flavor
-  target=$prefix/$dir
-  mkdir -p "$prefix"
-  stage=
-  trap cleanup EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  if [ -z "$from" ] && [ -x "$target/bin/sys1rust" ] &&
-    "$target/bin/sys1rust" --version </dev/null >/dev/null 2>&1; then
+  dir=
+  if [ -z "$from" ]; then
+    for entry in "$(readlink "$prefix/current" 2>/dev/null || true)" \
+      "$(readlink "$prefix/previous" 2>/dev/null || true)" "$owner/versions"/*; do
+      name=${entry##*/}
+      if owned_version "$name" && [ "$(cat "$prefix/$name/.sys1rust-release")" = "$tag-$flavor" ] &&
+        "$prefix/$name/bin/sys1rust" --version </dev/null >/dev/null 2>&1; then
+        dir=$name
+        break
+      fi
+    done
+  fi
+  if [ -n "$dir" ]; then
+    target=$prefix/$dir
     say "sys1rust $tag for $flavor is already in $target"
   else
     stage=$(mktemp -d "$prefix/.install.XXXXXX")
     get_bundle
-    # The new folder replaces one of the same version. current points at it by name, so it
-    # sees the new folder once the second mv is done.
-    if [ -e "$target" ] || [ -L "$target" ]; then mv "$target" "$stage/old"; fi
+    create_owner
+    dir=${tag#v}-$flavor.${stage##*.}
+    target=$prefix/$dir
+    if [ -e "$target" ] || [ -L "$target" ]; then die "$target already exists"; fi
+    printf '%s\n' "$dir" >"$new/.sys1rust-owned"
+    printf '%s\n' "$tag-$flavor" >"$new/.sys1rust-release"
+    : >"$owner/versions/$dir"
+    # The working version stays in place. Only current changes after this move succeeds.
     mv "$new" "$target"
   fi
 
   old=$(readlink "$prefix/current" 2>/dev/null || true)
   changed=0
   if [ "$old" != "$dir" ]; then
-    swap_link "$dir" "$prefix/current"
-    if [ -n "$old" ] && [ -d "$prefix/$old" ]; then swap_link "$old" "$prefix/previous"; fi
+    # Save the previous link first so interruption after the current switch keeps both.
+    if [ -n "$old" ] && owned_version "$old"; then record_link "$old" "$prefix/previous" "$owner/previous"; fi
+    record_link "$dir" "$prefix/current" "$owner/current"
     changed=1
   fi
   mkdir -p "$bin_dir"
   if [ "$(readlink "$link" 2>/dev/null || true)" != "$prefix/current/bin/sys1rust" ]; then
-    swap_link "$prefix/current/bin/sys1rust" "$link"
+    record_link "$prefix/current/bin/sys1rust" "$link" "$owner/bin-target"
   fi
   installed=$("$link" --version </dev/null 2>&1) || die "$link --version failed: $installed"
   say "Installed $installed in $target"
@@ -526,34 +693,33 @@ main() {
 
   # Keeps current and previous and deletes older versions.
   previous=$(readlink "$prefix/previous" 2>/dev/null || true)
-  for d in "$prefix"/*-macos14 "$prefix"/*-macos26; do
-    if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
-    name=${d##*/}
+  for entry in "$owner/versions"/*; do
+    [ -f "$entry" ] || continue
+    name=${entry##*/}
     if [ "$name" = "$dir" ] || [ "$name" = "$previous" ]; then continue; fi
-    rm -rf "$d"
-    say "Removed the old version $name"
+    if owned_version "$name"; then
+      rm -rf "${prefix:?}/$name"
+      say "Removed the old version $name"
+    fi
+    rm -f "$entry"
   done
 
-  run=sys1rust
+  run=$(shell_quote "$link")
   case ":$PATH:" in
     *":$bin_dir:"*)
       found=$(command -v sys1rust || true)
       if [ "$found" != "$link" ]; then say "$found comes before $link on PATH, so sys1rust runs that one"; fi
       ;;
     *)
-      run=$link
-      case $bin_dir in
-        "$HOME"/*) path_entry="\$HOME/${bin_dir#"$HOME"/}" ;;
-        *) path_entry=$bin_dir ;;
-      esac
       say "$bin_dir is not on PATH. For zsh, add this line to ~/.zshrc and open a new terminal:"
-      say "  export PATH=\"$path_entry:\$PATH\""
+      say "  export PATH=$(shell_quote "$bin_dir"):\"\$PATH\""
       ;;
   esac
 
   if [ "$service" = 1 ]; then
     install_service
   elif plist_runs_link && service_loaded; then
+    read_service_env
     if [ "$changed" = 1 ]; then
       # launchd starts a job at most once per ThrottleInterval, so this waits up to 30 s
       # when the service started less than 30 s ago.

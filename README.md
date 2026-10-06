@@ -21,32 +21,32 @@
 
 ## Install
 
-On an Apple silicon Mac with macOS 14 or later:
+To install on an Apple silicon Mac with macOS 14 or later, run:
 
 ```sh
-brew install krishhgg/tap/sys1rust
+curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh
 sys1rust serve
 ```
 
-The first `serve` downloads the typed-decisions model (846 MB) into the Hugging Face cache, then prints `listening on http://127.0.0.1:8000` when it's ready. `sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded. To run it in the background now and at every login, first stop the foreground server with Ctrl-C to free port 8000, then run:
+The script installs the latest release into `~/.local/share/sys1rust` and links `~/.local/bin/sys1rust`, without `sudo`. If `~/.local/bin` is not on your `PATH`, it prints the line to add to `~/.zshrc`. Until you add it, run `~/.local/bin/sys1rust serve` instead.
+
+On macOS 26.2 or later the script installs the bundle with MLX's build for that version, which is about 3x faster on the M5 than the bundle for macOS 14 to 26.1. The speed numbers in this README use the macOS 26 bundle. The [Releases](https://github.com/krishhgg/sys1rust/releases) page has both tarballs, and the script checks each download against the release's `SHA256SUMS`.
+
+The first `serve` downloads the typed-decisions model (846 MB) into the Hugging Face cache, then prints `listening on http://127.0.0.1:8000` when it's ready. `sys1rust pull [model]` downloads a model ahead of time and `sys1rust models` lists what is downloaded.
+
+To run it in the background now and at every login, first stop the foreground server with Ctrl-C to free port 8000, then install the service:
 
 ```sh
-brew services start sys1rust
+curl -fsSL https://raw.githubusercontent.com/krishhgg/sys1rust/main/install.sh | sh -s -- --service
 ```
 
-It logs to `$(brew --prefix)/var/log/sys1rust.log`. On macOS 26.2 or later, Homebrew installs the bundle with MLX's build for that version, which is about 3x faster on the M5 than the bundle for macOS 14 to 26.1. The speed numbers in this README use the macOS 26 build.
+The service is a LaunchAgent that runs `sys1rust serve` at login, restarts it if it crashes and logs to `~/Library/Logs/sys1rust.log`. From a clone of this repository, `./install.sh --service` does the same.
 
-Without Homebrew, download a tarball from [Releases](https://github.com/krishhgg/sys1rust/releases). `sys1rust-<version>-macos26-arm64.tar.gz` needs macOS 26.2 or later, and the `macos14` tarball runs on macOS 14 to 26.1. Unpack it, then clear the quarantine flag the browser set. The release signs the binary ad hoc without notarizing it, so macOS refuses to run it while the flag is set:
-
-```sh
-xattr -dr com.apple.quarantine sys1rust-*
-```
-
-Then run `bin/sys1rust serve` from the unpacked folder. The binary loads MLX from the `lib/` folder next to `bin/`, so keep the folder together. To run it as `sys1rust`, add that `bin/` to your `PATH` or symlink `bin/sys1rust` into a directory on it. A symlink still finds `lib/`.
+To update, run the install command again, and it restarts a running service on the new version. To uninstall, run it with `sh -s -- --uninstall` in place of `sh`, which removes the service, the install, the link and the log, keeps the downloaded models and prints how to delete them.
 
 ## Try it
 
-With the server from [Install](#install) running, in the foreground or under `brew services`, send it a request from another terminal:
+With the server from [Install](#install) running, in the foreground or as the service, send it a request from another terminal:
 
 ```sh
 curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
@@ -80,7 +80,7 @@ Every answer also has 2 confidence numbers, which measure different things:
 - `answer_confidence` is the probability of the most likely option. For `choice` that is the chosen label, for `score` the most likely level, which can differ from the expected `score`, and for `noul` the larger of yes and no. It is the one to use for deciding whether to trust an answer.
 - For `choice` and `score`, `confidence` is 1 minus the normalized entropy of the probabilities. It is 0 for an even split and 1 when everything is on one option. For `noul`, it equals `answer_confidence`, which is 0.5 for an even split.
 
-Don't compare them against the same threshold. `action.act_probability` is the model's probability, from a second output, for acting on the answer rather than escalating. Ctrl-C stops a foreground server, and `brew services stop sys1rust` stops the background one. When the server stops, the model is out of memory.
+Don't compare them against the same threshold. `action.act_probability` is the model's probability, from a second output, for acting on the answer rather than escalating. Ctrl-C stops a foreground server, and `launchctl bootout gui/$(id -u)/io.github.krishhgg.sys1rust` stops the service until the next login. When the server stops, the model is out of memory.
 
 ## How it works
 
@@ -215,6 +215,7 @@ $CARGO_TARGET_DIR/release/sys1rust serve --model typed-decisions --port 8000
 <details>
 <summary><strong>Repository layout</strong></summary>
 
+- `install.sh`: the installer for prebuilt releases.
 - `runtime/`: the Rust workspace.
   - `laya-core`: request parsing, tokenization, sequence layout and answer decoding, with no GPU code.
   - `laya-mlx`: the forward pass on MLX through mlx-rs.
@@ -222,6 +223,7 @@ $CARGO_TARGET_DIR/release/sys1rust serve --model typed-decisions --port 8000
   - `sys1-bench`: the benchmark adapter and `sys1-probe`.
   - `vendor/mlx-sys`: mlx-sys 0.6.0 with a build that can link a prebuilt MLX.
 - `bench/`: the benchmark harness, workloads and upstream reference answers (`bench/PLAN.md`).
+- `packaging/`: the release bundle builds, the smoke test and the release checklist (`packaging/RELEASE.md`).
 - `results/`: measured write-ups, from the bake-off of existing runtimes to the speed round.
 - `research/`: sourced reports on the models, runtimes and hardware.
 - `docs/assets/`: the diagrams in this README.

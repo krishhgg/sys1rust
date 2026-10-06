@@ -14,7 +14,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/sys1rust-install-test.XXXXXX")
 T=$(cd "$T" && pwd -P)
 SERVER_PID=
+INSTALL_PID=
 cleanup() {
+  if [ -n "$INSTALL_PID" ]; then kill "$INSTALL_PID" && wait "$INSTALL_PID"; fi 2>/dev/null || true
   if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" && wait "$SERVER_PID"; fi 2>/dev/null || true
   [ ! -f "$T/launchd/pid" ] || kill "$(cat "$T/launchd/pid")" 2>/dev/null || true
   rm -rf "$T"
@@ -33,6 +35,7 @@ check() {
 }
 has() { [[ $out == *"$1"* ]]; }
 link_is() { [ "$(readlink "$1" 2>/dev/null)" = "$2" ]; }
+version_is() { case $(readlink "$1" 2>/dev/null) in "$2".??????) return 0 ;; *) return 1 ;; esac; }
 
 free_port() { python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'; }
 
@@ -58,8 +61,8 @@ EOF
 cat >"$T/fake/launchctl" <<'EOF'
 #!/bin/sh
 # Records each call. bootstrap starts a /health server on LAYA_PORT, or with fail-next a
-# server that exits 1 at once, kickstart restarts it and bootout stops it. print reports like
-# launchd: after kickstart -k, the stopped run's exit code 0 stays in the report.
+# server that exits 1 at once, kickstart restarts it and bootout stops it. After kickstart -k,
+# print keeps the stopped run's exit code 0 in its report, as launchd does.
 d=$FAKE_LAUNCHD
 echo "$*" >>"$d/calls"
 case $1 in
@@ -79,7 +82,7 @@ case $1 in
     if [ -f "$d/fail-next" ]; then
       touch "$d/failed"
     else
-      python3 -m http.server --bind 127.0.0.1 --directory "$d/www" "$LAYA_PORT" >/dev/null 2>&1 </dev/null &
+      python3 -m http.server --bind 127.0.0.1 --directory "$d/www" "$(plutil -extract EnvironmentVariables.LAYA_PORT raw "$d/plist" 2>/dev/null || echo 8000)" >/dev/null 2>&1 </dev/null &
       echo $! >"$d/pid"
     fi
     touch "$d/loaded"
@@ -87,7 +90,7 @@ case $1 in
   kickstart)
     # The new run answers 2 s later, as a real server does after loading the model.
     kill "$(cat "$d/pid")"
-    (sleep 2 && exec python3 -m http.server --bind 127.0.0.1 --directory "$d/www" "$LAYA_PORT") \
+    (sleep 2 && exec python3 -m http.server --bind 127.0.0.1 --directory "$d/www" "$(plutil -extract EnvironmentVariables.LAYA_PORT raw "$d/plist" 2>/dev/null || echo 8000)") \
       >/dev/null 2>&1 </dev/null &
     echo $! >"$d/pid"
     touch "$d/kicked"
@@ -98,6 +101,29 @@ case $1 in
     rm -f "$d/loaded" "$d/pid" "$d/failed" "$d/kicked"
     ;;
 esac
+EOF
+cat >"$T/fake/mv" <<'EOF'
+#!/bin/sh
+case $1 in
+  -fh)
+    if [ "${FAKE_MV_MODE:-}" = after-switch ]; then
+      case $3 in
+        */current) /bin/mv "$@"; kill -TERM "$PPID"; exit 1 ;;
+      esac
+    fi
+    ;;
+  */.install.*/sys1rust-*)
+    case ${FAKE_MV_MODE:-} in
+      fail) exit 1 ;;
+      signal) kill -TERM "$PPID"; exit 1 ;;
+      pause)
+        touch "$FAKE_MV_READY"
+        while [ ! -e "$FAKE_MV_RESUME" ]; do sleep 0.1; done
+        ;;
+    esac
+    ;;
+esac
+exec /bin/mv "$@"
 EOF
 chmod +x "$T/fake"/*
 
@@ -110,6 +136,7 @@ make_bundle() {
 case \$1 in
   --version) echo "sys1rust $1 (MLX 0.32.2, $2 build)" ;;
   models)
+    [ -z "\${FAKE_MODELS_ENV:-}" ] || printf '%s\n' "\${HF_HUB_CACHE:-unset}" >"\$FAKE_MODELS_ENV"
     echo "MODEL            REPO                                    REVISION STATUS"
     echo "typed-decisions  convaiinnovations/laya-typed-decisions  1a793eb  \${FAKE_MODEL:-not downloaded, 846 MB}"
     ;;
@@ -177,30 +204,32 @@ for pair in 26.2:macos26 26.10:macos26 26.2.1:macos26 27:macos26 26.1:macos14 26
   15.7.1:macos14 14.0:macos14 14:macos14; do
   rm -rf "$T/f"
   run FAKE_MACOS="${pair%%:*}" -- --from "$T/d1" --prefix "$T/f" --bin-dir "$T/f/bin"
-  check "macOS ${pair%%:*} picks ${pair#*:}" link_is "$T/f/current" "0.1.0-${pair#*:}"
+  check "macOS ${pair%%:*} picks ${pair#*:}" version_is "$T/f/current" "0.1.0-${pair#*:}"
 done
 
 # Install, rerun, update, prune and a bad checksum, all from local dirs.
 run --from "$T/d1" --prefix "$P" --bin-dir "$B"
 check "install from d1" eval '[ $status = 0 ] && has "Installed sys1rust 0.1.0 (MLX 0.32.2, macos26 build) in $P/0.1.0-macos26"'
-check "version dir" test -x "$P/0.1.0-macos26/bin/sys1rust"
-check "current link" link_is "$P/current" 0.1.0-macos26
+first=$(readlink "$P/current")
+check "version dir" test -x "$P/$first/bin/sys1rust"
+check "current link" version_is "$P/current" 0.1.0-macos26
 check "bin link" link_is "$B/sys1rust" "$P/current/bin/sys1rust"
 check "--version through the link" eval '[ "$("$B/sys1rust" --version)" = "sys1rust 0.1.0 (MLX 0.32.2, macos26 build)" ]'
-check "PATH line for zsh" has "  export PATH=\"$B:\$PATH\""
-check "next step and model size" eval 'has "Next, start the server: $B/sys1rust serve" && has "typed-decisions model (846 MB)"'
+check "PATH line for zsh" has "  export PATH='$B':\"\$PATH\""
+check "next step" has "Next, start the server: '$B/sys1rust' serve"
+check "model size" has "typed-decisions model (846 MB)"
 check "no staging dir left" eval '[ -z "$(find "$P" -maxdepth 1 -name ".install.*")" ]'
-before=$(state "$P" "$B")
 run --from "$T/d1" --prefix "$P" --bin-dir "$B"
 check "rerun succeeds" test "$status" = 0
-check "rerun leaves the same files and links" eval '[ "$(state "$P" "$B")" = "$before" ]'
+check "rerun switches immutable directories" eval '[ "$(readlink "$P/current")" != "$first" ] && link_is "$P/previous" "$first" && [ -x "$P/$first/bin/sys1rust" ]'
+second=$(readlink "$P/current")
 run --from "$T/d2" --prefix "$P" --bin-dir "$B"
-check "update to 0.2.0" eval '[ $status = 0 ] && link_is "$P/current" 0.2.0-macos26 && link_is "$P/previous" 0.1.0-macos26'
-check "0.1.0 kept as previous" test -d "$P/0.1.0-macos26"
+check "update to 0.2.0" eval '[ $status = 0 ] && version_is "$P/current" 0.2.0-macos26 && version_is "$P/previous" 0.1.0-macos26'
+check "0.1.0 kept as previous" test -d "$P/$second"
 run --from "$T/d3" --prefix "$P" --bin-dir "$B"
-check "update to 0.3.0" eval '[ $status = 0 ] && link_is "$P/current" 0.3.0-macos26 && link_is "$P/previous" 0.2.0-macos26'
-check "0.1.0 pruned" eval '[ ! -e "$P/0.1.0-macos26" ] && has "Removed the old version 0.1.0-macos26"'
-check "2 versions left" eval '[ "$(find "$P" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d " ")" = 2 ]'
+check "update to 0.3.0" eval '[ $status = 0 ] && version_is "$P/current" 0.3.0-macos26 && version_is "$P/previous" 0.2.0-macos26'
+check "0.1.0 pruned" eval '[ ! -e "$P/$second" ] && has "Removed the old version 0.1.0-macos26"'
+check "2 versions left" eval '[ "$(find "$P" -mindepth 1 -maxdepth 1 -type d ! -name ".*" | wc -l | tr -d " ")" = 2 ]'
 # head closes the pipe after 1 line, and each install must still finish, pruning included.
 status=0
 for d in d3 d2 d1; do
@@ -208,11 +237,12 @@ for d in d3 d2 d1; do
     "$SH" "$ROOT/install.sh" --from "$T/$d" --prefix "$T/h" --bin-dir "$T/hb" | head -n 1 >/dev/null || status=$?
 done
 out=$(ls -a "$T/h")
-check "output closed early still finishes" eval '[ $status = 0 ] && link_is "$T/h/current" 0.1.0-macos26 && [ ! -e "$T/h/0.3.0-macos26" ]'
+check "output closed early still finishes" eval '[ $status = 0 ] && version_is "$T/h/current" 0.1.0-macos26 && [ -z "$(find "$T/h" -maxdepth 1 -name "0.3.0-macos26.*")" ] && [ ! -e "$T/h/.lock" ]'
 printf 'corrupt' | dd of="$T/d4/sys1rust-0.4.0-macos26-arm64.tar.gz" bs=1 seek=100 conv=notrunc 2>/dev/null
+before=$(state "$P" "$B")
 run --from "$T/d4" --prefix "$P" --bin-dir "$B"
 check "bad checksum fails" eval '[ $status = 1 ] && has "install.sh: sys1rust-0.4.0-macos26-arm64.tar.gz has sha256"'
-check "bad checksum changes nothing" eval 'link_is "$P/current" 0.3.0-macos26 && [ ! -e "$P/0.4.0-macos26" ]'
+check "bad checksum changes nothing" eval '[ "$(state "$P" "$B")" = "$before" ]'
 check "bad checksum leaves no staging dir" eval '[ -z "$(find "$P" -maxdepth 1 -name ".install.*")" ]'
 mkdir -p "$T/b2" && touch "$T/b2/sys1rust"
 run --from "$T/d1" --prefix "$T/p2" --bin-dir "$T/b2"
@@ -259,13 +289,13 @@ SERVER_PID=$!
 for _ in $(seq 50); do [ -s "$T/server-port" ] && break; sleep 0.1; done
 URL=http://127.0.0.1:$(cat "$T/server-port")/releases
 run SYS1RUST_RELEASES_URL="$URL" -- --prefix "$T/u" --bin-dir "$T/u/bin"
-check "latest release" eval '[ $status = 0 ] && link_is "$T/u/current" 0.2.0-macos26 && has "Downloading $URL/download/v0.2.0/sys1rust-0.2.0-macos26-arm64.tar.gz"'
+check "latest release" eval '[ $status = 0 ] && version_is "$T/u/current" 0.2.0-macos26 && has "Downloading $URL/download/v0.2.0/sys1rust-0.2.0-macos26-arm64.tar.gz"'
 run SYS1RUST_RELEASES_URL="$URL" -- --prefix "$T/u" --bin-dir "$T/u/bin"
 check "rerun on the latest skips the download" eval '[ $status = 0 ] && has "already in" && ! has Downloading'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v0.3.0-rc1 --prefix "$T/u" --bin-dir "$T/u/bin"
-check "--version picks a release candidate" eval '[ $status = 0 ] && link_is "$T/u/current" 0.3.0-rc1-macos26'
+check "--version picks a release candidate" eval '[ $status = 0 ] && version_is "$T/u/current" 0.3.0-rc1-macos26'
 run SYS1RUST_RELEASES_URL="$URL" -- --version 0.2.0 --prefix "$T/u" --bin-dir "$T/u/bin"
-check "--version without v rolls back to previous" eval '[ $status = 0 ] && link_is "$T/u/current" 0.2.0-macos26 && link_is "$T/u/previous" 0.3.0-rc1-macos26'
+check "--version without v rolls back to previous" eval '[ $status = 0 ] && version_is "$T/u/current" 0.2.0-macos26 && version_is "$T/u/previous" 0.3.0-rc1-macos26'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v9.9.9 --prefix "$T/u" --bin-dir "$T/u/bin"
 check "missing tag" eval '[ $status = 1 ] && has "install.sh: there is no release v9.9.9"'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v9.9.9 --prefix "$T/u3" --bin-dir "$T/u3/bin"
@@ -275,7 +305,7 @@ check "release without SHA256SUMS" eval '[ $status = 1 ] && has "install.sh: rel
 run SYS1RUST_RELEASES_URL="$URL" FAKE_MACOS=15.5 -- --version v0.2.0 --prefix "$T/u" --bin-dir "$T/u/bin"
 check "release without this flavor" eval '[ $status = 1 ] && has "install.sh: release v0.2.0 has no sys1rust-0.2.0-macos14-arm64.tar.gz"'
 run SYS1RUST_RELEASES_URL="$URL" -- --version v0.6.0 --prefix "$T/u" --bin-dir "$T/u/bin"
-check "a bad download fails" eval '[ $status = 1 ] && has "install.sh: sys1rust-0.6.0-macos26-arm64.tar.gz has sha256" && link_is "$T/u/current" 0.2.0-macos26'
+check "a bad download fails" eval '[ $status = 1 ] && has "install.sh: sys1rust-0.6.0-macos26-arm64.tar.gz has sha256" && version_is "$T/u/current" 0.2.0-macos26'
 check "a bad download is deleted" eval '[ -z "$(find "$T/u" -name "*.tar.gz")" ] && [ ! -e "$T/u/0.6.0-macos26" ]'
 rm "$W/latest-tag"
 run SYS1RUST_RELEASES_URL="$URL" -- --prefix "$T/u2" --bin-dir "$T/u2/bin"
@@ -285,6 +315,12 @@ check "no release yet" eval '[ $status = 1 ] && has "install.sh: sys1rust has no
 AGENT=$T/home/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist
 LOG=$T/home/Library/Logs/sys1rust.log
 S=$T/s
+mkdir -p "$T/home/Library/Logs"
+echo foreign >"$LOG"
+run --from "$T/d1" --prefix "$T/foreign-log" --bin-dir "$T/foreign-log-bin" --service
+check "service refuses an unrelated existing log" eval '[ $status = 1 ] && has "already exists without an installer LaunchAgent" && [ "$(cat "$LOG")" = foreign ]'
+run --uninstall --prefix "$T/foreign-log" --bin-dir "$T/foreign-log-bin"
+rm "$LOG"
 run HF_HUB_CACHE="$T/hub" -- --from "$T/d1" --prefix "$S" --bin-dir "$T/sb" --service
 check "--service" eval '[ $status = 0 ] && has "sys1rust serve answers on http://127.0.0.1:$PORT" && has "with HF_HUB_CACHE=$T/hub"'
 check "plist is valid" plutil -lint -s "$AGENT"
@@ -293,13 +329,16 @@ check "plist passes HF_HUB_CACHE and LAYA_PORT" eval '[ "$(plutil -extract Envir
 check "plist restarts on failure only" eval '[ "$(plutil -extract KeepAlive.SuccessfulExit raw "$AGENT")" = false ] && [ "$(plutil -extract RunAtLoad raw "$AGENT")" = true ]'
 check "plist logs" eval '[ "$(plutil -extract StandardErrorPath raw "$AGENT")" = "$LOG" ]'
 : >"$T/launchd/calls"
+run HF_HUB_CACHE=./cache HF_HOME=./hf XDG_CACHE_HOME=./xdg -- --from "$T/d1" --prefix "$S" --bin-dir "$T/sb" --service
+check "relative service caches become absolute" eval '[ $status = 0 ] && [ "$(plutil -extract EnvironmentVariables.HF_HUB_CACHE raw "$AGENT")" = "$PWD/./cache" ] && [ "$(plutil -extract EnvironmentVariables.HF_HOME raw "$AGENT")" = "$PWD/./hf" ] && [ "$(plutil -extract EnvironmentVariables.XDG_CACHE_HOME raw "$AGENT")" = "$PWD/./xdg" ]'
 run HF_HUB_CACHE="$T/hub" -- --from "$T/d1" --prefix "$S" --bin-dir "$T/sb" --service
 check "--service rerun reloads" eval '[ $status = 0 ] && grep -q "^bootout gui/$(id -u)/io.github.krishhgg.sys1rust$" "$T/launchd/calls" && grep -q "^bootstrap gui/$(id -u) $AGENT$" "$T/launchd/calls"'
 : >"$T/launchd/calls"
-run --from "$T/d2" --prefix "$S" --bin-dir "$T/sb"
+run LAYA_PORT="$(free_port)" HF_HUB_CACHE="$T/wrong-cache" FAKE_MODELS_ENV="$T/model-cache" -- --from "$T/d2" --prefix "$S" --bin-dir "$T/sb"
 check "an update restarts the service" eval '[ $status = 0 ] && grep -q "^kickstart -k gui/$(id -u)/io.github.krishhgg.sys1rust$" "$T/launchd/calls" && has "Restarting the sys1rust service"'
+check "service update probes its recorded cache" eval '[ "$(cat "$T/model-cache")" = "$T/hub" ]'
 : >"$T/launchd/calls"
-run --from "$T/d2" --prefix "$S" --bin-dir "$T/sb"
+run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$S" --bin-dir "$T/sb"
 check "a rerun leaves the service alone" eval '[ $status = 0 ] && ! grep -q kickstart "$T/launchd/calls" && has "The sys1rust service runs this version"'
 # An install and uninstall in another prefix leave this service alone.
 : >"$T/launchd/calls"
@@ -309,24 +348,24 @@ run --uninstall --prefix "$T/o" --bin-dir "$T/ob"
 check "another prefix keeps the LaunchAgent" eval '[ $status = 0 ] && has "Left the LaunchAgent $AGENT and its log" && [ -f "$AGENT" ] && [ -f "$T/launchd/loaded" ] && [ ! -e "$T/o" ]'
 
 # Uninstall.
-run --from "$T/d2" --prefix "$S" --bin-dir "$T/sb" --service
+run HF_HUB_CACHE="$T/hub" -- --from "$T/d2" --prefix "$S" --bin-dir "$T/sb" --service
 mkdir -p "$T/hub/models--convaiinnovations--laya-typed-decisions/blobs"
 dd if=/dev/zero of="$T/hub/models--convaiinnovations--laya-typed-decisions/blobs/x" bs=1000000 count=3 2>/dev/null
 echo log >"$LOG"
-run HF_HUB_CACHE="$T/hub" -- --uninstall --prefix "$S" --bin-dir "$T/sb"
+run HF_HUB_CACHE="$T/wrong-cache" LAYA_PORT=invalid -- --uninstall --prefix "$S" --bin-dir "$T/sb"
 check "--uninstall" eval '[ $status = 0 ] && has "Stopped the sys1rust service" && [ ! -e "$T/launchd/loaded" ]'
 check "--uninstall removes everything" eval '[ ! -e "$AGENT" ] && [ ! -e "$S" ] && [ ! -L "$T/sb/sys1rust" ] && [ ! -e "$LOG" ]'
-check "--uninstall keeps the models" eval 'has "Kept the Laya models in the model cache $T/hub, 3 MB" && has "rm -rf \"$T/hub\"/models--convaiinnovations--laya*" && [ -d "$T/hub/models--convaiinnovations--laya-typed-decisions" ]'
+check "--uninstall keeps the models" eval 'has "Kept the Laya models in the model cache $T/hub, 3 MB" && [ -d "$T/hub/models--convaiinnovations--laya-typed-decisions" ]'
 check "health server stopped" eval '! curl -fs --max-time 2 "http://127.0.0.1:$PORT/health"'
 run --from "$T/d1" --prefix "$T/n" --bin-dir "$T/n/bin"
 run --uninstall --prefix "$T/n" --bin-dir "$T/n/bin"
-check "--uninstall removes a bin dir inside the prefix" eval '[ $status = 0 ] && has "Removed $T/n" && [ ! -e "$T/n" ]'
+check "--uninstall removes a bin dir inside the prefix" eval '[ $status = 0 ] && has "Removed the registered install from $T/n" && [ ! -e "$T/n" ]'
 run --from "$T/d1" --prefix "$P" --bin-dir "$B"
 touch "$P/notes.txt"
 ln -sf /usr/bin/true "$B/sys1rust"
 run --uninstall --prefix "$P" --bin-dir "$B"
-check "--uninstall keeps foreign files" eval '[ $status = 0 ] && has "Left $P, which holds files" && [ -f "$P/notes.txt" ] && [ ! -e "$P/current" ]'
-check "--uninstall keeps a foreign link" eval 'has "Left $B/sys1rust, which points to /usr/bin/true" && [ -L "$B/sys1rust" ]'
+check "--uninstall keeps foreign files" eval '[ $status = 0 ] && has "Any unrelated files stay there" && [ -f "$P/notes.txt" ] && [ ! -e "$P/current" ]'
+check "--uninstall keeps a foreign link" eval 'has "Left $B/sys1rust, which no longer matches the installer registry" && [ -L "$B/sys1rust" ]'
 check "--uninstall default cache line" eval 'has "$T/home/.cache/huggingface/hub holds no Laya models"'
 
 # A server that exits at once fails --service without waiting out HEALTH_WAIT.
@@ -337,6 +376,13 @@ check "a failing service is reported" eval '[ $status = 1 ] && has "install.sh: 
 rm "$T/launchd/fail-next"
 run --uninstall --prefix "$T/s2" --bin-dir "$T/sb2"
 
+run --from "$T/d1" --prefix "$T/replaced-log" --bin-dir "$T/replaced-log-bin" --service
+mv "$LOG" "$LOG.original"
+echo replacement >"$LOG"
+run --uninstall --prefix "$T/replaced-log" --bin-dir "$T/replaced-log-bin"
+check "uninstall preserves a replaced log" eval '[ $status = 0 ] && [ "$(cat "$LOG")" = replacement ]'
+rm "$LOG" "$LOG.original"
+
 # Another server on the port stops --service before it loads the LaunchAgent.
 OTHER_PORT=$(free_port)
 python3 -m http.server --bind 127.0.0.1 --directory "$T/launchd/www" "$OTHER_PORT" >/dev/null 2>&1 &
@@ -346,6 +392,88 @@ run LAYA_PORT="$OTHER_PORT" -- --from "$T/d1" --prefix "$T/s3" --bin-dir "$T/sb3
 kill "$OTHER"
 wait "$OTHER" 2>/dev/null || true
 check "a busy port stops --service" eval '[ $status = 1 ] && has "install.sh: another server answers on 127.0.0.1:$OTHER_PORT" && [ ! -e "$AGENT" ]'
+
+
+# Wrong prefixes and familiar-looking foreign names never establish ownership.
+FOREIGN=$T/foreign
+mkdir -p "$FOREIGN/backup-macos14" "$FOREIGN/0.0.1-macos26"
+touch "$FOREIGN/current" "$FOREIGN/previous" "$FOREIGN/backup-macos14/keep"
+foreign_before=$(state "$FOREIGN")
+run --uninstall --prefix "$FOREIGN" --bin-dir "$T/fb"
+check "uninstall refuses an unregistered prefix" eval '[ $status = 1 ] && [ "$(state "$FOREIGN")" = "$foreign_before" ]'
+run --from "$T/d1" --prefix "$FOREIGN" --bin-dir "$T/fb"
+check "install refuses foreign prefix contents" eval '[ $status = 1 ] && has "has no installer registry" && [ "$(state "$FOREIGN")" = "$foreign_before" ]'
+
+run --from "$T/d1" --prefix "$T/owned" --bin-dir "$T/owned-bin"
+mkdir -p "$T/owned/backup-macos14" "$T/owned/0.0.1-macos26"
+touch "$T/owned/backup-macos14/keep"
+run --from "$T/d2" --prefix "$T/owned" --bin-dir "$T/owned-bin"
+run --from "$T/d3" --prefix "$T/owned" --bin-dir "$T/owned-bin"
+check "pruning preserves foreign version names" eval '[ $status = 0 ] && [ -f "$T/owned/backup-macos14/keep" ] && [ -d "$T/owned/0.0.1-macos26" ]'
+rm "$T/owned/current" "$T/owned/previous"
+touch "$T/owned/current" "$T/owned/previous"
+run --uninstall --prefix "$T/owned" --bin-dir "$T/owned-bin"
+check "uninstall preserves replaced links and foreign names" eval '[ $status = 0 ] && [ -f "$T/owned/current" ] && [ -f "$T/owned/previous" ] && [ -f "$T/owned/backup-macos14/keep" ] && [ -d "$T/owned/0.0.1-macos26" ]'
+for target in "$T/flink/other" "$T/flink/../outside/bin/sys1rust"; do
+  rm -rf "$T/flink" "$T/flink-bin"
+  run --from "$T/d1" --prefix "$T/flink" --bin-dir "$T/flink-bin"
+  rm "$T/flink-bin/sys1rust"
+  ln -s "$target" "$T/flink-bin/sys1rust"
+  run --from "$T/d2" --prefix "$T/flink" --bin-dir "$T/flink-bin"
+  check "install refuses a foreign link $target" eval '[ $status = 1 ] && link_is "$T/flink-bin/sys1rust" "$target" && version_is "$T/flink/current" 0.1.0-macos26'
+  run --uninstall --prefix "$T/flink" --bin-dir "$T/flink-bin"
+  check "uninstall preserves foreign link $target" link_is "$T/flink-bin/sys1rust" "$target"
+done
+
+# Failure at the directory move leaves the old directory and current usable.
+run --from "$T/d1" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+active=$(readlink "$T/atomic/current")
+for mode in fail signal; do
+  run FAKE_MV_MODE="$mode" -- --from "$T/d1" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+  check "a $mode at the directory move keeps current" eval '[ $status != 0 ] && link_is "$T/atomic/current" "$active" && [ -x "$T/atomic/$active/bin/sys1rust" ] && "$T/atomic-bin/sys1rust" --version >/dev/null && [ ! -e "$T/atomic/.lock" ]'
+done
+
+# Hold one install at the move, then try both an update and an uninstall.
+env -i HOME="$T/home" PATH="$T/fake:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$T" \
+  FAKE_LAUNCHD="$T/launchd" FAKE_MV_MODE=pause FAKE_MV_READY="$T/ready" FAKE_MV_RESUME="$T/resume" \
+  "$SH" "$ROOT/install.sh" --from "$T/d2" --prefix "$T/atomic" --bin-dir "$T/atomic-bin" >"$T/overlap.log" 2>&1 &
+INSTALL_PID=$!
+for _ in $(seq 50); do [ -e "$T/ready" ] && break; sleep 0.1; done
+check "the first install holds the lock" test -f "$T/ready"
+run --from "$T/d3" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+check "an overlapping update refuses the lock" eval '[ $status = 1 ] && has "another installer is running" && link_is "$T/atomic/current" "$active"'
+run --uninstall --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+check "an overlapping uninstall refuses the lock" eval '[ $status = 1 ] && has "another installer is running" && link_is "$T/atomic/current" "$active"'
+touch "$T/resume"
+status=0
+wait "$INSTALL_PID" || status=$?
+INSTALL_PID=
+check "the serialized update leaves both versions usable" eval '[ $status = 0 ] && version_is "$T/atomic/current" 0.2.0-macos26 && link_is "$T/atomic/previous" "$active" && "$T/atomic-bin/sys1rust" --version >/dev/null'
+mkdir "$T/atomic/.lock"
+echo 99999999 >"$T/atomic/.lock/pid"
+run --from "$T/d3" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+check "a stale lock has a recovery command" eval '[ $status = 1 ] && has "stale installer lock" && has "rmdir" && version_is "$T/atomic/current" 0.2.0-macos26'
+rm "$T/atomic/.lock/pid"
+rmdir "$T/atomic/.lock"
+run --from "$T/d3" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+check "install resumes after stale lock recovery" eval '[ $status = 0 ] && version_is "$T/atomic/current" 0.3.0-macos26'
+
+run FAKE_MV_MODE=after-switch -- --from "$T/d2" --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+switched=$(readlink "$T/atomic/current")
+check "an interruption after current switches leaves a working binary" eval '[ $status != 0 ] && version_is "$T/atomic/current" 0.2.0-macos26 && "$T/atomic-bin/sys1rust" --version >/dev/null && [ ! -e "$T/atomic/.lock" ]'
+run SYS1RUST_RELEASES_URL="$URL" -- --version v0.2.0 --prefix "$T/atomic" --bin-dir "$T/atomic-bin"
+check "a rerun recognizes an interrupted link registry update" eval '[ $status = 0 ] && link_is "$T/atomic/current" "$switched"'
+
+# Evaluate the printed PATH assignment in a fresh shell. Directory text stays literal.
+WEIRD="$T/bin space' dollar\$ backtick\` quote\" backslash\\"
+run --from "$T/d1" --prefix "$T/quoted" --bin-dir "$WEIRD"
+path_line=$(printf '%s\n' "$out" | sed -n 's/^  export PATH=/export PATH=/p')
+quoted_path=$(env -i PATH=/usr/bin:/bin /bin/sh -c "$path_line"'; printf "%s" "$PATH"')
+check "printed PATH preserves shell metacharacters" test "$quoted_path" = "$WEIRD:/usr/bin:/bin"
+serve_line=$(printf '%s\n' "$out" | sed -n 's/^Next, start the server: //p')
+version_line=${serve_line% serve}' --version'
+quoted_version=$(env -i PATH=/usr/bin:/bin /bin/sh -c "$version_line")
+check "printed binary command preserves shell metacharacters" test "$quoted_version" = 'sys1rust 0.1.0 (MLX 0.32.2, macos26 build)'
 
 echo "$SH: $passed passed, $failed failed"
 [ "$failed" = 0 ]
