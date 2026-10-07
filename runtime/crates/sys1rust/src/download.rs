@@ -447,7 +447,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Download progress. On a terminal, `Progress` rewrites one line per file in place at most
-/// every 200 ms. Elsewhere, such as the `brew services` log, it prints a line at every 10%.
+/// every 200 ms. Elsewhere, such as the `install.sh --service` log, it prints a line at every 10%.
 pub struct Progress<W: Write> {
     out: W,
     tty: bool,
