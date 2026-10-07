@@ -186,11 +186,13 @@ Report in a few lines:
 Refresh the clone first. Run the clone block in `AGENTS.md` again if you made the scratch clone with it, or `git pull --ff-only` in a clone of the user's own. Then run:
 
 ```sh
-PORT=$(plutil -extract EnvironmentVariables.LAYA_PORT raw ~/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist 2>/dev/null || echo 8000)
-LAYA_PORT="$PORT" ./install.sh
+SERVICE_PORT=$(plutil -extract EnvironmentVariables.LAYA_PORT raw ~/Library/LaunchAgents/io.github.krishhgg.sys1rust.plist 2>/dev/null || echo 8000)
+LAYA_PORT="$SERVICE_PORT" ./install.sh
 ```
 
-The first line reads the service's port from its LaunchAgent, and gives 8000 when there is no LaunchAgent or it sets no port. The installer itself also reads an existing service's port and cache from that plist before checking a restarted service. The installer installs the latest release, moves the `current` link to it, keeps the version before it as `previous` and deletes older ones. If the service runs, the installer restarts it on the new version and waits for `/health` on that port. Restart a server you started yourself with `kill <pid>` and the start block in step 5, with its port. If the new release pins a new model revision, run `~/.local/bin/sys1rust pull` to download it ahead of time, or the next `serve` downloads it. Then repeat step 6.
+The first line reads the service's port into `SERVICE_PORT`, with 8000 as the fallback, and leaves the chosen `PORT` unchanged. The installer itself also reads an existing service's port and cache from that plist before checking a restarted service. It installs the latest release, moves `current` to it, keeps the version before it as `previous` and deletes older ones. If the service runs, the installer restarts it on the new version and waits for `/health` on that port.
+
+For the LaunchAgent, set `PORT=$SERVICE_PORT` before repeating step 6. For a server you started yourself, keep its chosen `PORT`, stop it with `kill <pid>` and repeat the start block in step 5 with that port, then step 6. If the new release pins a new model revision, run `~/.local/bin/sys1rust pull` to download it ahead of time, or the next `serve` downloads it.
 
 Rerun an interrupted update to finish any pending service restart. The installer accepts `/health` only when the LaunchAgent's PID owns the listening port, so a foreground server cannot hide a failed service restart.
 
